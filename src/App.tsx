@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef, Suspense, lazy } from 'react';
-import { Send, MessageSquare, Terminal, Layout, Layers, RefreshCw, Smartphone, Monitor } from 'lucide-react';
+import { Send, MessageSquare, Terminal, Layout, Layers, RefreshCw, Smartphone, Monitor, Loader2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import axios from 'axios';
+import ReactMarkdown from 'react-markdown';
 
 // Lazy loading the sandbox component to handle re-renders better
 const PreviewTarget = lazy(() => import('./sandbox/Target'));
@@ -42,9 +43,21 @@ export default function App() {
   const [input, setInput] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
   const [previewMode, setPreviewMode] = useState<'desktop' | 'mobile'>('desktop');
+  const [previewKey, setPreviewKey] = useState(0); // 用來強制刷新預覽畫面
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    // 網頁開啟時，立即讀取並初始化專案框架文件檔
+    const initFramework = async () => {
+      try {
+        await fetch('http://localhost:3002/api/init-framework');
+        console.log('[System] 專案框架文件已載入完成。');
+      } catch (err) {
+        console.error('[Error] 框架初始化失敗:', err);
+      }
+    };
+    initFramework();
+
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [messages]);
 
@@ -72,26 +85,45 @@ export default function App() {
 
       while (true) {
         const { value, done } = await reader.read();
-        if (done) break;
+        if (done) {
+          setPreviewKey(prev => prev + 1);
+          break;
+        }
 
-        const chunkText = decoder.decode(value);
-        // 解析 SSE 格式 (data: {...}\n\n)
+        const chunkText = decoder.decode(value, { stream: true });
+        // 解析可能包含多個 data: 或不完整 data: 的封包
         const lines = chunkText.split('\n');
+        
         for (const line of lines) {
+          if (!line.trim()) continue;
+          
           if (line.startsWith('data: ')) {
             try {
-              const data = JSON.parse(line.slice(6));
-              if (data.done) break;
+              const cleanedLine = line.replace('data: ', '').trim();
+              if (!cleanedLine) continue;
+              
+              const data = JSON.parse(cleanedLine);
+              if (data.done) {
+                setPreviewKey(prev => prev + 1);
+                break;
+              }
+
               if (data.chunk) {
                 accumulatedContent += data.chunk;
-                // 更新最後一條 AI 訊息
+                // 強制觸發 React 更新最後一條訊息，確保流感
                 setMessages(prev => {
                   const updated = [...prev];
-                  updated[updated.length - 1].content = accumulatedContent;
+                  const lastIdx = updated.length - 1;
+                  if (updated[lastIdx].role === 'ai') {
+                    updated[lastIdx].content = accumulatedContent;
+                  }
                   return updated;
                 });
               }
-            } catch (e) { /* 解析失敗略過 */ }
+            } catch (e) {
+              // 如果 JSON 解析失敗，代表可能是被切割的封包，保留至下次處理或忽略
+              // 在流式傳輸中，這種情況偶爾發生，這裡我們先略過異常
+            }
           }
         }
       }
@@ -144,7 +176,7 @@ export default function App() {
             >
               <SandboxErrorBoundary>
                 <Suspense fallback={<div className="flex items-center justify-center p-20 animate-pulse text-zinc-500">正在準備環境...</div>}>
-                  <PreviewTarget />
+                  <PreviewTarget key={previewKey} />
                 </Suspense>
               </SandboxErrorBoundary>
             </motion.div>
@@ -179,12 +211,18 @@ export default function App() {
                 key={i} 
                 className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}
               >
-                <div className={`p-4 rounded-2xl max-w-[85%] text-sm leading-relaxed shadow-lg ${
+                <div className={`p-4 rounded-2xl max-w-[85%] text-sm leading-relaxed shadow-lg markdown-content ${
                   msg.role === 'user' 
                   ? 'bg-blue-600 text-white rounded-tr-none' 
                   : 'bg-white/5 text-zinc-200 border border-white/5 rounded-tl-none'
                 }`}>
-                  {msg.content}
+                  {msg.role === 'ai' && msg.content.includes('🚀') && (
+                    <div className="flex items-center gap-2 mb-2 text-indigo-400 font-medium animate-pulse">
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>AI 正在構思代碼變更...</span>
+                    </div>
+                  )}
+                  <ReactMarkdown>{msg.content}</ReactMarkdown>
                 </div>
                 <span className="text-[10px] text-zinc-600 mt-1 px-1">{msg.timestamp}</span>
               </motion.div>
@@ -202,7 +240,12 @@ export default function App() {
               <textarea
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && (e.preventDefault(), handleSend())}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                    e.preventDefault();
+                    handleSend();
+                  }
+                }}
                 placeholder="如何修改介面？ (例如：改為深紅主題、加入多個卡片...)"
                 className="w-full bg-white/5 border border-white/10 rounded-2xl px-5 py-4 pr-14 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all resize-none group-hover:border-white/20 h-24"
               />

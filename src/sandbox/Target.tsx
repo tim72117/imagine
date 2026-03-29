@@ -1,19 +1,38 @@
 
 import React from 'react';
-import { Sparkles, Terminal } from 'lucide-react';
 
-export default function Target() {
+const BlankPage = () => {
   return (
-    <div className="p-12 bg-zinc-900 border border-zinc-800 rounded-[2.5rem] text-center shadow-3xl">
-      <div className="w-16 h-16 bg-blue-500/10 rounded-2xl flex items-center justify-center mx-auto mb-8">
-        <Sparkles className="text-blue-500 w-8 h-8" />
-      </div>
-      <h1 className="text-3xl font-bold mb-4 italic">「幫我做一個淺綠色的登入頁面。看到請回覆。」</h1>
-      <p className="text-zinc-500 mb-8 max-w-sm mx-auto">Gemini 正在快馬加鞭處理中（目前處於冷卻階段），這是為您準備的初步設計概念。</p>
-      <div className="grid grid-cols-2 gap-4">
-        <div className="p-5 bg-white/5 rounded-2xl border border-white/5">現代化介面</div>
-        <div className="p-5 bg-white/5 rounded-2xl border border-white/5">即時渲染</div>
+    <div className="flex flex-col h-screen">
+      {/* Top Toolbar */}
+      <nav className="w-full bg-gray-800 p-4 flex items-center justify-between shadow-md">
+        <div className="text-white text-lg font-bold">我的應用程式</div>
+        <div className="flex space-x-4">
+          <a href="#" className="text-gray-300 hover:text-white">首頁</a>
+          <a href="#" className="text-gray-300 hover:text-white">關於</a>
+          <a href="#" className="text-gray-300 hover:text-white">服務</a>
+          <a href="#" className="text-gray-300 hover:text-white">聯絡</a>
+        </div>
+      </nav>
+
+      {/* Main Content Area (Sidebar + Content) */}
+      <div className="flex-grow flex">
+        {/* Left Sidebar */}
+        <aside className="w-64 bg-gray-200 p-4 shadow-md">
+          <ul className="space-y-2">
+            <li><a href="#" className="block text-gray-700 hover:text-gray-900 font-medium">選項 1</a></li>
+            <li><a href="#" className="block text-gray-700 hover:text-gray-900 font-medium">選項 2</a></li>
+            <li><a href="#" className="block text-gray-700 hover:text-gray-900 font-medium">選項 3</a></li>
+          </ul>
+        </aside>
+
+        {/* Main Content */}
+        <main className="flex-grow bg-white flex items-center justify-center">
+          <p className="text-center text-gray-500 text-xl">這是一個空白的範例網頁</p>
+        </main>
       </div>
     </div>
   );
-}
+};
+
+export default BlankPage;
