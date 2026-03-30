@@ -66,12 +66,8 @@ const tools = [{
   ]
 }];
 
-// 初始化 Gemini SDK
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
-const model = genAI.getGenerativeModel({ 
-  model: "gemini-2.5-flash",
-  tools: tools
-});
+const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash", tools: tools });
 
 let isProcessBusy = false;
 let isAnalyzingFramework = false;
@@ -105,6 +101,100 @@ export async function recordGeminiResponse(prompt, output, type = "CHAT", rawDat
     console.error('[Error] 紀錄失敗:', error);
   }
 }
+
+// --- Tool Handler 封裝 ---
+class ToolRegistry {
+  constructor() {
+    this.handlers = new Map();
+    this.priorities = {
+      "update_framework": 10,
+      "reset_project": 20,
+      "update_ui": 30,
+      "send_message": 40
+    };
+  }
+
+  register(toolName, handler) {
+    this.handlers.set(toolName, handler);
+  }
+
+  async execute(toolCalls, context = {}) {
+    // 依優先順序排序
+    const sorted = [...toolCalls].sort((a, b) => {
+      const pA = this.priorities[a.name] || 99;
+      const pB = this.priorities[b.name] || 99;
+      return pA - pB;
+    });
+
+    let chainStatus = { triggerNext: false, nextPrompt: "" };
+    const results = [];
+    for (const call of sorted) {
+      const handler = this.handlers.get(call.name);
+      if (handler) {
+        console.log(`[Tool] 正在執行: ${call.name} (優先級: ${this.priorities[call.name] || 99})`);
+        const result = await handler(call.args, context);
+        results.push({ name: call.name, ...result });
+        
+        // 檢查是否由 Handler 觸發連鎖請求
+        if (result.triggerNext) {
+          chainStatus.triggerNext = true;
+          chainStatus.nextPrompt = result.nextPrompt;
+        }
+      } else {
+        console.warn(`[Tool] 找不到處理常式: ${call.name}`);
+      }
+    }
+    return { results, chainStatus };
+  }
+}
+
+const registry = new ToolRegistry();
+
+// 註冊：更新架構
+registry.register("update_framework", async (args, context) => {
+  if (args.new_content) await fs.writeFile(FRAMEWORK_FILE, args.new_content, 'utf8');
+  
+  // 如果這一輪沒有同時呼叫 update_ui，則觸發自動跟進
+  const hasUiCall = context.allCalls.some(c => c.name === "update_ui");
+  return { 
+    success: true, 
+    triggerNext: !hasUiCall, 
+    nextPrompt: "已更新開發手冊 (Framework.md)，請立即根據最新的開發規範產出對應的 App.tsx 實作代碼。" 
+  };
+});
+
+// 註冊：重置專案
+registry.register("reset_project", async (args, context) => {
+  if (args.new_framework_content) {
+    await fs.writeFile(FRAMEWORK_FILE, args.new_framework_content, 'utf8');
+  }
+  const { onChunk } = context;
+  onChunk(`⚠️ **重置提案：** ${args.reason}\n\n`);
+  onChunk("\n[SIGNAL:RESET_PROPOSAL]\n⚠️ **專案大方向已重置，正在重新生成代碼...**\n\n");
+  
+  const hasUiCall = context.allCalls.some(c => c.name === "update_ui");
+  return { 
+    success: true, 
+    triggerNext: !hasUiCall, 
+    nextPrompt: `專案大方向已重置為「${args.reason}」，已更新 Framework.md，請立即根據新規劃產出對應的代碼實作。` 
+  };
+});
+
+// 註冊：更新 UI
+registry.register("update_ui", async (args, { onChunk }) => {
+  if (args.code) {
+    if (args.explanation) {
+      onChunk(`🚀 **更新 UI：** ${args.explanation}\n\n`);
+    }
+    await fs.writeFile(TARGET_FILE, args.code, 'utf8');
+  }
+  return { success: true, explanation: args.explanation };
+});
+
+// 註冊：發送訊息
+registry.register("send_message", async (args) => {
+  return { success: true, text: args.text };
+});
 
 // 自動分析專案內容並初始化框架定義文件 (Framework.md)
 export async function checkAndInitializeFramework() {
@@ -162,29 +252,29 @@ export async function checkAndInitializeFramework() {
   }
 }
 
-// 核心串流處理解析器
+// 核心串流處理解析器 (支援連鎖請求)
 export async function streamGeminiSDK(userPrompt, onChunk, onComplete) {
-  if (isProcessBusy) {
-    onChunk('\n[系統提示]：伺服器忙碌中，請稍候...\n');
-    onComplete();
-    return;
-  }
-
-  let currentCode = "";
-  let frameworkDocs = "";
-  try {
-    currentCode = await fs.readFile(TARGET_FILE, 'utf8');
-    frameworkDocs = await fs.readFile(FRAMEWORK_FILE, 'utf8');
-  } catch (err) {
-    currentCode = "// 目前尚無現有代碼。";
-    frameworkDocs = "// 目前尚無框架定義。";
-  }
-
+  if (isProcessBusy) { onChunk('\n[系統提示]：伺服器忙碌中...\n'); onComplete(); return; }
   isProcessBusy = true;
+  let loopCount = 0;
+  const MAX_LOOPS = 3;
+  let currentPrompt = userPrompt;
 
   try {
-    const systemInstruction = `你是一個專業的 UI 工程師。
-以下是專案的【開發框架與規範】：
+    while (loopCount < MAX_LOOPS) {
+      loopCount++;
+      const currentCode = await fs.readFile(TARGET_FILE, 'utf8').catch(() => "// 尚無代碼");
+      const frameworkDocs = await fs.readFile(FRAMEWORK_FILE, 'utf8').catch(() => "// 尚無框架");
+
+      const systemInstruction = `你是一個專業的前端 UI 專家。
+目前專案環境為「極簡化動態 Sandbox」，請嚴格遵守以下代碼架構規範：
+1. **技術棧**: 僅限使用 React 18 (Functional Component) 與 Tailwind CSS。
+2. **圖示限制**: 目前【不支援】Lucide 或任何第三方圖示庫，請改用 Emoji 或 Tailwind 的精美排版與形狀替代圖示需求。
+3. **單一組件**: 所有代碼必須包含在一個名為 \`App\` 的組件內 (例如: const App = () => { ... })。
+4. **無須引進 (No Imports)**: 環境已預載 React 與 Tailwind，請直接撰寫組件邏輯，不要加入 import 語句。
+5. **UI 風格**: 追求高端、精緻且具備現代感的介面設計。
+
+以下是專案的【開發規範文件 (Framework.md)】：
 ---
 ${frameworkDocs}
 ---
@@ -195,104 +285,57 @@ ${currentCode}
 ---
 
 根據需求，你可以選擇：
-1. 使用 update_ui 修改現有代碼或生成新代碼。
-2. 使用 update_framework 更新你的開發規範文件。
+1. 使用 update_ui 修改現有代碼或生成新動態組件。
+2. 使用 update_framework 更新開發規範文檔。
 3. 使用 send_message 回答問題、規劃進度。
 4. 【重要提案】若大改方向，請呼叫 reset_project 回傳重置提案與規畫。
-【關鍵連動指令】：如果你對新規規畫有信心，請在同一次回應中接著呼叫 update_ui 產出對應的第一版實作代碼（不需等待使用者確認，實現一氣呵成的重啟）。`;
+【連動指令】：如果你進行了架構調整，請在同一次回應中接著呼叫 update_ui 產出對應的代碼。`;
 
-    console.log(`[Executing Stream Tool Call] for: ${userPrompt}`);
-    
-    const result = await model.generateContentStream({
-      contents: [{ role: "user", parts: [{ text: `${systemInstruction}\nUser Request: ${userPrompt}` }] }]
-    });
-
-    let fullOutput = "";
-    let toolCalls = []; // 用於紀錄這一回合所有的工具調用
-    let lastSentLength = 0;
-    let hasSentUpdateHint = false;
-    let hasLoggedRawChunk = false; 
-    let chunksHistory = []; 
-
-    for await (const chunk of result.stream) {
-      chunksHistory.push(chunk); 
+      console.log(`[Flow] 執行階段 (Loop ${loopCount}): ${currentPrompt.slice(0, 50)}...`);
       
-      const candidate = chunk.candidates?.[0];
-      if (!candidate || !candidate.content || !candidate.content.parts) continue;
+      const result = await model.generateContentStream({
+        contents: [{ role: "user", parts: [{ text: `${systemInstruction}\nUser Request: ${currentPrompt}` }] }]
+      });
 
-      // 遍歷所有 candidate 中的 parts，避免遺漏多重工具調用
-      for (const part of candidate.content.parts) {
-        if (part.functionCall) {
-          toolCalls.push({
-            name: part.functionCall.name,
-            args: part.functionCall.args
-          });
-          
-          const args = part.functionCall.args;
-          if (args.code) {
-            if (!hasSentUpdateHint && args.explanation) {
-              onChunk(`🚀 **更新 UI：** ${args.explanation}\n\n`);
-              hasSentUpdateHint = true;
+      let toolCalls = [];
+      let lastSentLength = 0;
+      let fullOutput = "";
+
+      for await (const chunk of result.stream) {
+        const cand = chunk.candidates?.[0];
+        if (!cand?.content?.parts) continue;
+        for (const part of cand.content.parts) {
+          if (part.functionCall) {
+            toolCalls.push({ name: part.functionCall.name, args: part.functionCall.args });
+            if (part.functionCall.args.text) {
+              const delta = part.functionCall.args.text.slice(lastSentLength);
+              if (delta) { onChunk(delta); fullOutput += delta; lastSentLength = part.functionCall.args.text.length; }
             }
-          } else if (args.new_framework_content || args.new_content) {
-            onChunk("📖 **同步手冊：** 偵測到架構變更，正在自動對齊開發手冊...\n\n");
-          } else if (args.reason) {
-            onChunk(`⚠️ **重置提案：** ${args.reason}\n\n`);
-          } else if (args.text) {
-            const delta = args.text.slice(lastSentLength);
-            if (delta) {
-              onChunk(delta);
-              lastSentLength = args.text.length;
-            }
+          } else if (part.text) {
+            onChunk(part.text);
+            fullOutput += part.text;
           }
-        } else if (part.text) {
-          onChunk(part.text);
-          fullOutput += part.text;
         }
       }
+
+      const { results, chainStatus } = await registry.execute(toolCalls, { onChunk, onComplete, allCalls: toolCalls });
+      
+      const uiRes = results.find(r => r.name === "update_ui");
+      const msgRes = results.find(r => r.name === "send_message");
+      const finalDisplay = msgRes?.text || fullOutput || (uiRes ? (uiRes.explanation || "UI 更新完畢。") : `Step ${loopCount} 完成。`);
+      
+      await recordGeminiResponse(currentPrompt, finalDisplay, "TOOL_STEP", { calls: toolCalls, results });
+
+      if (chainStatus.triggerNext && loopCount < MAX_LOOPS) {
+        console.log(`[Flow] 自行連鎖觸發: ${chainStatus.nextPrompt}`);
+        currentPrompt = chainStatus.nextPrompt;
+        continue;
+      } else { break; }
     }
-
-    // --- 最終處置：依照「手冊 -> 代碼 -> 對話」的固定流程處理 ---
-    // 1. 先處理 Framework 全量更新 (順序優先)
-    const frameworkCall = toolCalls.find(c => c.name === "update_framework" || (c.name === "reset_project" && c.args.new_framework_content));
-    if (frameworkCall) {
-      console.log(`[Flow] 執行階段 1: 更新 Framework 文件`);
-      const newContent = frameworkCall.args.new_framework_content || frameworkCall.args.new_content;
-      if (newContent) await fs.writeFile(FRAMEWORK_FILE, newContent, 'utf8');
-    }
-
-    // 2. 處理重置信號 (先處理信號，但不中斷流程)
-    const resetCall = toolCalls.find(c => c.name === "reset_project");
-    if (resetCall) {
-      console.log(`[Flow] 執行階段 2: 處理重置規畫`);
-      onChunk("\n[SIGNAL:RESET_PROPOSAL]\n⚠️ **專案大方向已重置，新規畫已同步至手冊。**\n\n");
-    }
-
-    // 3. 處理 UI 更新 (不論前面是否有重置)
-    const uiCall = toolCalls.find(c => c.name === "update_ui");
-    if (uiCall) {
-      console.log(`[Flow] 執行階段 3: 更新 UI 組件代碼`);
-      await fs.writeFile(TARGET_FILE, uiCall.args.code, 'utf8');
-    }
-
-    // 3. 彙整紀錄用的 Output
-    const messageCall = toolCalls.find(c => c.name === "send_message");
-    if (messageCall) fullOutput = messageCall.args.text;
-    else if (uiCall) fullOutput = uiCall.args.explanation || "UI 更新完畢。";
-
-    await recordGeminiResponse(userPrompt, fullOutput, toolCalls.length > 0 ? "TOOL" : "CHAT", {
-      calls: toolCalls,
-      chunks: chunksHistory,
-      fullText: fullOutput
-    });
-
   } catch (error) {
-    console.error(`[Fatal Error]: ${error.message}`);
+    console.error(`[Error]: ${error.message}`);
     onChunk(`\n[Server Error]: ${error.message}\n`);
   } finally {
-    setTimeout(() => {
-      isProcessBusy = false;
-      onComplete();
-    }, COOLDOWN_MS);
+    setTimeout(() => { isProcessBusy = false; onComplete(); }, COOLDOWN_MS);
   }
 }

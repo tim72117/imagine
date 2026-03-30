@@ -57,6 +57,18 @@ app.get('/api/init-framework', async (req, res) => {
   }
 });
 
+// 路由 3: 取得目前 Sandbox 代碼
+app.get('/api/get-ui-code', async (req, res) => {
+  try {
+    const { TARGET_FILE } = await import('./ai.js');
+    const { default: fs } = await import('fs-extra');
+    const code = await fs.readFile(TARGET_FILE, 'utf8');
+    res.json({ success: true, code });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 const PORT = 3002;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 AI Agent Server is listening on http://0.0.0.0:${PORT}`);
