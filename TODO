@@ -1,0 +1,32 @@
+# AI 代理通訊架構實驗筆記 (TODO)
+
+## 實驗議題：流式時序執行 (Sequential Streaming Flush)
+### 實作日期：2026-03-31
+
+### 核心目標
+達成「對話泡泡」與「動作泡泡」完全依據 AI 產出的原始時序交織排列，且不被強行合併。
+
+### 邏輯方案 (暫予封存)
+1. **緩衝區沖刷 (Flush Mechanism)**: 在 `for await` 大循環中維護一個 `textToFlush` 變數。
+2. **斷點偵測**: 只要 AI 生成了一個 `functionCall`，就立即執行 `registry.execute([{ name: "stage_report", args: { summary: textToFlush } }])`。
+3. **即時性**: 不再對工具進行 Batch 排序執行，改為單點即時調用。
+
+### 優缺點分析
+- **優點**: 極致的實時感，對話與動作的先後順序完全透明。
+- **缺點**: 對後端 `while` 迴圈與 `registry` 的執行頻率要求較高，且文字片段過小時可能導致過多零碎泡泡（需加強 Trim/Buffer 判斷）。
+
+
+Spawner (衍生器) 或 Orchestrator (協調者) 
+---
+### 目前狀態：已依要求還原至「穩定批次彙整版」。
+
+---
+
+## 待執行議題 (Pending Tasks)
+1. **規劃後細節詢問機制 (Post-Plan Detail Querying)**:
+    - 當 `plan` 分解完畢後，若有模糊項應具備詢問細節的能力。
+    - **持久化記憶 (Persistent Memory)**: 思考如何跨越 Task Lifecycle 將這些細節答案存入 `Framework.md` 或獨立的 `context.json` 中。
+2. **`send_message` 重複出現問題 (Duplicate Output Loop)**:
+    - AI 推論時似乎會重複產生文字片段或重複呼叫 `send_message` 任務。
+    - 需檢查 `ai_request` 的解析邏輯與 `generateContentStream` 的 chunk 捕捉方式，確保不會對同一段文字重複派發任務。
+

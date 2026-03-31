@@ -354,6 +354,10 @@ registry.register("bootstrap_request", async (args) => {
 registry.register("ai_request", async (args, context) => {
     const { getIsAborted } = context;
     const currentPrompt = args.prompt;
+    
+    // --- 關鍵修復：將推論上下文注入 context，供衍生任務參考 ---
+    context.currentPrompt = currentPrompt;
+    
     const derivedTasks = [];
 
     const frameworkDocs = await fs.readFile(FRAMEWORK_FILE, 'utf8').catch(() => "// 尚無框架");
@@ -383,6 +387,8 @@ ${frameworkDocs}
         contents: [{ role: "user", parts: [{ text: `${systemInstruction}\nUser Request: ${currentPrompt}` }] }]
     });
 
+    let textBuffer = "";
+
     for await (const chunk of result.stream) {
         if (getIsAborted && getIsAborted()) {
             console.log("[Flow] 生成過程中偵測到中斷。");
@@ -390,13 +396,26 @@ ${frameworkDocs}
         }
         const cand = chunk.candidates?.[0];
         if (!cand?.content?.parts) continue;
+        
         for (const part of cand.content.parts) {
             if (part.functionCall) {
+                // 1. 如果緩衝區有文字，在調用工具前先將文字送出
+                if (textBuffer.trim()) {
+                    derivedTasks.push({ name: "send_message", args: { text: textBuffer.trim() } });
+                    textBuffer = "";
+                }
+                // 2. 加入工具任務
                 derivedTasks.push({ name: part.functionCall.name, args: part.functionCall.args });
             } else if (part.text) {
-                derivedTasks.push({ name: "send_message", args: { text: part.text } });
+                // 3. 累積文字片段
+                textBuffer += part.text;
             }
         }
+    }
+    
+    // 4. Stream 結束後，送出最後剩下的文字
+    if (textBuffer.trim()) {
+        derivedTasks.push({ name: "send_message", args: { text: textBuffer.trim() } });
     }
     
     return { success: true, derivedTasks };

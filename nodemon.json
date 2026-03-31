@@ -1,0 +1,7 @@
+{
+  "ignore": [
+    "server/history/*",
+    "src/sandbox/Target.tsx",
+    "src/sandbox/Framework.md"
+  ]
+}
