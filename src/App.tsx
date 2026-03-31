@@ -86,6 +86,7 @@ export default function App() {
   const abortControllerRef = useRef<AbortController | null>(null);
 
   const fetchLatestCode = async () => {
+    setIsLoadingCode(true);
     try {
       const res = await axios.get('http://localhost:3002/api/get-ui-code');
       if (res.data.success) {
@@ -177,6 +178,18 @@ export default function App() {
                 break;
               }
 
+              // 處理渲染訊號
+              if (data.type === 'rendering' && data.isLoading) {
+                setIsLoadingCode(true);
+                continue;
+              }
+
+              // 處理重刷訊號
+              if (data.type === 'refresh') {
+                fetchLatestCode();
+                continue;
+              }
+
               // 處理狀態訊號
               if (data.type === 'status') {
                 setStatusMessage(data.message);
@@ -259,7 +272,7 @@ export default function App() {
               layout
               className={`${previewMode === 'mobile' ? 'w-[375px]' : 'w-full max-w-6xl'} transition-all duration-500`}
             >
-              <SandboxIframe code={code} isLoading={isLoadingCode || isProcessing} />
+              <SandboxIframe code={code} isLoading={isLoadingCode} />
             </motion.div>
           </main>
         </section>

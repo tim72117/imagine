@@ -72,26 +72,42 @@ const tools = [{
     },
     {
       name: "plan",
-      description: "當接收到的需求過於龐大、複雜或涉及多階段變動時呼叫。進行全局架構分析、步驟拆解並更新開發手冊以明確後續計畫。",
+      description: "當接收到的需求過於龐大、複雜、涉及多階段變動，或是需求本身描述過於空泛、抽象、不明確時呼叫。進行全局架構分析、需求澄清、步驟拆解並更新開發手冊以明確後續計畫。",
       parameters: {
         type: "OBJECT",
         properties: {
-          analysis: { type: "STRING", description: "針對大型任務的現狀分析、困難點與拆解邏輯。" },
+          analysis: { type: "STRING", description: "針對大型任務的現狀分析，或針對空泛需求的澄清、假設與困難點拆解邏輯。" },
           updated_framework: { type: "STRING", description: "根據拆解後的計畫，重新編寫或增修 Framework.md 的內容。" },
-          next_steps_plan: { type: "STRING", description: "列出具體的執行隊列，明確分階段實作的第一步目標。" }
+          next_steps_plan: { type: "STRING", description: "列出具體的執行隊列，明確分階段實作的第一步目標或是預計要釐清的項目。" }
         },
         required: ["analysis", "updated_framework", "next_steps_plan"]
+      }
+    },
+    {
+      name: "bootstrap_request",
+      description: "內部工具。處理初始請求的標準化轉送。",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          user_prompt: { type: "STRING", description: "使用者的原始需求。" }
+        },
+        required: ["user_prompt"]
       }
     }
   ]
 }];
 
+// 自動生成工具清單指令的輔助函式
+function getToolDescriptionPrompt() {
+  const decls = tools[0].functionDeclarations;
+  const list = decls.map(t => `- **${t.name}**: ${t.description}`).join('\n');
+  return `【可用工具清單 (Toolkits)】：\n${list}\n\n請根據需求選擇最適合的工具組合，可依序執行多個步驟。`;
+}
+
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
 const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash", tools: tools });
 
 let isProcessBusy = false;
-let isAnalyzingFramework = false;
-const COOLDOWN_MS = 1000;
 
 // 紀錄回應資訊的函式 (堆疊式，每小時一個檔案)
 export async function recordGeminiResponse(prompt, output, type = "CHAT", rawData = null) {
@@ -126,13 +142,31 @@ export async function recordGeminiResponse(prompt, output, type = "CHAT", rawDat
 class ToolRegistry {
   constructor() {
     this.handlers = new Map();
+    this.hooks = new Map(); // 用於儲存鉤子函式
     this.priorities = {
-      "list_sandbox_files": 4,  // 列出清單最優先
+      "bootstrap_request": 1,
+      "list_sandbox_files": 4,  // 列出清單
       "read_file_content": 5,   // 分析特定檔案
       "update_framework": 10,  // 規範優先
-      "plan": 20,              // 任務規劃優先度居中
+      "plan": 20,              // 任務規劃
       "update_ui": 30          // 實作最後
     };
+  }
+
+  // 註冊鉤子方法
+  on(toolName, stage, callback) {
+    const key = `${toolName}:${stage}`;
+    if (!this.hooks.has(key)) this.hooks.set(key, []);
+    this.hooks.get(key).push(callback);
+  }
+
+  // 執行鉤子的內部方法
+  async runHooks(toolName, stage, data) {
+    const hooks = this.hooks.get(`${toolName}:${stage}`) || [];
+    const globalHooks = this.hooks.get(`*:${stage}`) || [];
+    for (const hook of [...globalHooks, ...hooks]) {
+      await hook(data);
+    }
   }
 
   register(toolName, handler) {
@@ -151,8 +185,15 @@ class ToolRegistry {
     for (const call of sorted) {
       const handler = this.handlers.get(call.name);
       if (handler) {
+        // --- 執行 Before 鉤子 ---
+        await this.runHooks(call.name, 'before', { toolName: call.name, args: call.args, context });
+
         const result = await handler(call.args, context);
         results.push({ name: call.name, ...result });
+
+        // --- 執行 After 鉤子 (保留擴充空間) ---
+        await this.runHooks(call.name, 'after', { toolName: call.name, args: call.args, result, context });
+
         if (result.triggerNext) {
           chainStatus.triggerNext = true;
           chainStatus.nextPrompt = result.nextPrompt;
@@ -163,128 +204,103 @@ class ToolRegistry {
   }
 }
 
-const registry = new ToolRegistry();
+export const registry = new ToolRegistry();
 
 // 註冊：清單讀取
-registry.register("list_sandbox_files", async (args, { onChunk, currentPrompt }) => {
+registry.register("list_sandbox_files", async (args, { currentPrompt }) => {
   try {
     const sandboxDir = path.join(__dirname, '../src/sandbox/');
     const files = await fs.readdir(sandboxDir);
-    onChunk({ type: 'status', message: `📡 正在讀取目錄：${args.explanation}` });
 
+    // 將檔案清單轉為完整相對路徑
     const fullPaths = files.map(file => path.join('src/sandbox', file).replace(/\\/g, '/'));
     const fileList = fullPaths.join(', ');
 
-    onChunk({ isNew: true });
-    onChunk({ chunk: `✅ **清單獲取：** [${fileList}]\n⏭️ **計畫：** ${args.next_step}` });
-
     return {
       success: true,
+      fileList,
       triggerNext: true,
-      nextPrompt: `${currentPrompt}\n---\n【目錄清單】：[${fileList}]\n目前分析理由：${args.explanation}\n下一步計畫：${args.next_step}`
+      nextPrompt: `${currentPrompt}\n---\n【目錄清單】：[${fileList}]\n分析原因：${args.explanation}\n下一步：${args.next_step}`
     };
   } catch (err) {
     return {
       success: false,
       triggerNext: true,
-      nextPrompt: `${currentPrompt}\n---\n【系統錯誤】目錄清單獲取失敗：${err.message}\n請嘗試其他方式或檢查目錄是否存在。`
+      nextPrompt: `【系統錯誤】目錄清單獲取失敗：${err.message}`
     };
   }
 });
 
 // 註冊：讀取檔案內容並針對性分析
-registry.register("read_file_content", async (args, { onChunk, currentPrompt }) => {
+registry.register("read_file_content", async (args, { currentPrompt }) => {
   try {
     const absPath = path.isAbsolute(args.path) ? args.path : path.join(__dirname, '../', args.path);
     const content = await fs.readFile(absPath, 'utf8');
-    onChunk({ type: 'status', message: `🔍 正在分析：${args.path} (${args.explanation})` });
-    onChunk({ isNew: true });
-    onChunk({ chunk: `✅ **分析完成：** \`${args.path}\`\n⏭️ **計畫：** ${args.next_step}` });
     return {
       success: true,
+      content,
       triggerNext: true,
       nextPrompt: `${currentPrompt}\n---\n【檔案內容：${args.path}】\n${content}\n---\n原因：${args.explanation}\n計畫：${args.next_step}`
     };
   } catch (err) {
-    onChunk({ isNew: true });
-    onChunk({ chunk: `❌ **讀取失敗：** \`${args.path}\` - ${err.message}\n\n` });
     return {
       success: false,
       triggerNext: true,
-      nextPrompt: `${currentPrompt}\n---\n【系統錯誤】讀取檔案「${args.path}」失敗：${err.message}\n請檢查路徑是否正確，或嘗試 \`list_sandbox_files\` 確認檔案存在。`
+      nextPrompt: `${currentPrompt}\n---\n【系統錯誤】讀取檔案「${args.path}」失敗：${err.message}\n請檢查路徑是否正確。`
     };
   }
 });
 
 // 註冊：更新架構
-registry.register("update_framework", async (args, { onChunk, allCalls }) => {
-  if (args.new_content) await fs.writeFile(FRAMEWORK_FILE, args.new_content, 'utf8');
-  onChunk({ type: 'status', message: `📖 已同步手冊：${args.next_step}` });
-  onChunk({ isNew: true });
-  onChunk({ chunk: `✅ **手冊已更新**\n⏭️ **計畫：** ${args.next_step}` });
-
-  const hasUiCall = allCalls.some(c => c.name === "update_ui");
+registry.register("update_framework", async (args, { currentPrompt }) => {
   return {
     success: true,
-    triggerNext: !hasUiCall,
-    nextPrompt: `已更新 Framework.md。下一步計畫是：${args.next_step}。請根據此目標執行下一步動作。`
+    triggerNext: true,
+    nextPrompt: `${currentPrompt}\n---\n已更新 Framework.md。下一步計畫是：${args.next_step}。`
   };
 });
 
 // 註冊：任務拆解與規劃
-registry.register("plan", async (args, { onChunk, allCalls }) => {
-  if (args.updated_framework) {
-    await fs.writeFile(FRAMEWORK_FILE, args.updated_framework, 'utf8');
-  }
-  onChunk({ type: 'status', message: `🧩 正在進行全局規劃：${args.analysis}` });
-  onChunk({ isNew: true });
-  onChunk({ chunk: `🎯 **規劃完成**\n⏭️ **當前目標：** ${args.next_steps_plan}` });
-  onChunk({ chunk: "\n[SIGNAL:PLAN_GENERATED]\n" });
-
-  const hasUiCall = allCalls.some(c => c.name === "update_ui");
+registry.register("plan", async (args, { currentPrompt }) => {
   return {
     success: true,
-    triggerNext: !hasUiCall,
-    nextPrompt: `規劃已生效。分析：${args.analysis}。第一步預計執行計畫：${args.next_steps_plan}。請立即按照該計畫啟動第一階段任務。`
+    triggerNext: true,
+    nextPrompt: `${currentPrompt}\n---\n規劃已生效。分析：${args.analysis}。第一步預計執行計畫：${args.next_steps_plan}。`
   };
 });
 
 // 註冊：更新 UI
-registry.register("update_ui", async (args, { onChunk }) => {
-  if (args.code) {
-    onChunk({ type: 'status', message: `🚀 正在套用 UI 變更：${args.explanation}` });
-    await fs.writeFile(TARGET_FILE, args.code, 'utf8');
-    onChunk({ isNew: true });
-    onChunk({ chunk: `✨ **UI 已更新：** ${args.explanation}\n⏭️ **計畫：** ${args.next_step}` });
-  }
+registry.register("update_ui", async (args) => {
   return { success: true, explanation: args.explanation, next_step: args.next_step };
 });
 
-// 基礎專案環境檢查 (不再自動觸發 AI 分析，改由 AI 呼叫工具)
-export async function checkAndInitializeFramework() {
-  try {
-    const exists = await fs.pathExists(FRAMEWORK_FILE);
-    if (!exists) {
-      await fs.writeFile(FRAMEWORK_FILE, "# Framework.md\n請等待 AI 進行全局掃描後建立規範。", 'utf8');
-    }
-    console.log("[System] 專案環境檢查完成。分析主導權已移交給 AI Agent。");
-    return "Ready";
-  } catch (error) {
-    console.error("[Error] 環境初始化失敗:", error);
-    throw error;
-  }
-}
+// 註冊：初始轉送 (No-Op UI)
+registry.register("bootstrap_request", async (args) => {
+  return { 
+    success: true, 
+    triggerNext: true, 
+    nextPrompt: args.user_prompt 
+  };
+});
 
 // 核心串流處理解析器 (支援連鎖請求與中斷)
-export async function streamGeminiSDK(userPrompt, onChunk, onComplete, getIsAborted) {
-  if (isProcessBusy) { onChunk({ chunk: '\n[系統提示]：伺服器忙碌中...\n' }); onComplete(); return; }
-  isProcessBusy = true;
+export async function streamGeminiSDK(userPrompt, onChunk, onComplete, getIsAborted, isRecursive = false) {
+  if (!isRecursive) {
+    if (isProcessBusy) { onChunk({ chunk: '\n[系統提示]：伺服器忙碌中...\n' }); onComplete(); return; }
+    isProcessBusy = true;
+
+    // 初始處理：手動推入第一次工具呼叫 (bootstrap)，建立純淨的轉送上下文
+    const seed = [{ 
+      name: "bootstrap_request", 
+      args: { user_prompt: userPrompt } 
+    }];
+    const { chainStatus } = await registry.execute(seed, { onChunk, currentPrompt: userPrompt });
+    if (chainStatus.triggerNext) userPrompt = chainStatus.nextPrompt; // 更新初始 Prompt
+  }
+  
   let loopCount = 0;
   const MAX_LOOPS = 3;
   let currentPrompt = userPrompt;
-
-  // 初始發送一個新泡泡信號
-  onChunk({ isNew: true });
 
   try {
     while (loopCount < MAX_LOOPS) {
@@ -299,16 +315,17 @@ export async function streamGeminiSDK(userPrompt, onChunk, onComplete, getIsAbor
 注意：【禁止憑空推論】。如果你的上下文不足以支撐對現有專案實作的精確理解，【必須】立刻呼叫工具進行主動偵查。
 
 【專案執行原則】：
-1. **分析先行**: 接收到需求後，若未掌握具體檔案結構或代碼，首動動作一定是 \`list_sandbox_files\` 並選擇性讀取關鍵檔案。
-2. **規格一致性**: 所有的代碼產出必須符合下方列出的 Framework.md 規範。
+1. **分析先行**: 接收到需求後，若未掌握具體檔案結構或編碼細節，或是需求本身過於空泛抽象，請優先使用偵查類工具或 \`plan\` 工具。
+2. **規格一致性**: 所有的產出必須符合下方列出的 Framework.md 規範。
 3. **透明度**: 所有說明與分析流程請一律使用【繁體中文】。
 
-【執行 SOP 流程】：
-1. **主動偵查 (Discovery Step)**: 當不知道專案內容或代碼細節時，主動使用 \`list_sandbox_files\` 與 \`read_file_content\`。
-2. **精確執行 (Implementation Step)**: 使用 \`update_ui\` 實作代碼。
-3. **下一步執行計畫 (Planning Step)**: 每次回應必須包含後續動作的規劃。
+【執行流程 (SOP)】：
+1. **探索與釐清階段 (Discovery & Clarify)**: 調用偵查工具以獲取環境現況並釐清空泛需求。
+2. **決議與規劃階段 (Reasoning & Plan)**: 使用計畫工具梳理多階段開發步驟。
+3. **執行階段 (Implementation)**: 套用代碼變更或與使用者對話回報進度。
 
-你可以選擇多個工具【依序執行】。目前已停用單純文字對話，請務必透過工具執行來推進任務。
+${getToolDescriptionPrompt()}
+
 
 【開發規範文件 (Framework.md)】：
 ---
@@ -323,8 +340,8 @@ ${frameworkDocs}
 
       let toolCalls = [];
       let fullOutput = "";
-      let lastExplanationLength = 0; // 用於追蹤 explanation 的串流進度
-      let hasSentToolHint = false;
+      let hasSentFirstBubble = false;
+
 
       for await (const chunk of result.stream) {
         if (getIsAborted && getIsAborted()) {
@@ -337,30 +354,34 @@ ${frameworkDocs}
           if (part.functionCall) {
             toolCalls.push({ name: part.functionCall.name, args: part.functionCall.args });
 
-            // 處理 explanation 的即時回顯
             const args = part.functionCall.args;
             if (args.explanation) {
               onChunk({ type: 'status', message: `🚀 正在準備：${args.explanation}` });
-              lastExplanationLength = args.explanation.length;
             }
           } else if (part.text) {
+            if (!hasSentFirstBubble) {
+              onChunk({ isNew: true });
+              hasSentFirstBubble = true;
+            }
             onChunk({ chunk: part.text });
             fullOutput += part.text;
           }
         }
       }
 
-      // --- 若本輪沒有任何 Tool Call，直接回傳文字並跳出迴圈 ---
-      if (toolCalls.length === 0) {
-        await recordGeminiResponse(currentPrompt, fullOutput, "TEXT", { text: fullOutput });
+      // --- 若本輪沒有任何內容產出，直接跳出迴圈 ---
+      if (toolCalls.length === 0 && !fullOutput.trim()) {
         break;
       }
 
-      // --- 進入工具處理系統，傳入 currentPrompt 以供連鎖決定 ---
+      // --- 紀錄文字記錄 ---
+      if (fullOutput.trim()) {
+        await recordGeminiResponse(currentPrompt, fullOutput, "TEXT", { text: fullOutput });
+      }
+
+      // --- 進入工具處理系統 ---
       const { results, chainStatus } = await registry.execute(toolCalls, {
         onChunk,
-        onComplete,
-        allCalls: toolCalls,
         currentPrompt
       });
 
@@ -376,15 +397,14 @@ ${frameworkDocs}
 
       if (chainStatus.triggerNext && loopCount < MAX_LOOPS) {
         console.log(`[Flow] 自行連鎖觸發: ${chainStatus.nextPrompt}`);
-        currentPrompt = chainStatus.nextPrompt;
-        continue;
+        await streamGeminiSDK(chainStatus.nextPrompt, onChunk, onComplete, getIsAborted, true);
+        return; // 遞迴已接管，直接結束本層
       } else { break; }
     }
-  } catch (error) {
-    console.error(`[Error]: ${error.message}`);
-    onChunk({ isNew: true });
-    onChunk({ chunk: `\n[Server Error]: ${error.message}\n` });
   } finally {
-    setTimeout(() => { isProcessBusy = false; onComplete(); }, COOLDOWN_MS);
+    if (!isRecursive) {
+      isProcessBusy = false; 
+      onComplete();
+    }
   }
 }
