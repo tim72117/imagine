@@ -18,49 +18,69 @@ export const HISTORY_DIR = path.join(__dirname, 'history');
 const tools = [{
   functionDeclarations: [
     {
-      name: "update_ui",
-      description: "當使用者要求修改、優化、美化或生成全新的 React 組件介面時呼叫。需提供完整 React 代碼與簡短的變更說明。",
+      name: "list_sandbox_files",
+      description: "列出 src/sandbox/ 目錄下的所有檔案與資料夾。需說明讀取原因與接下來的計畫。",
       parameters: {
         type: "OBJECT",
         properties: {
-          code: { type: "STRING", description: "完整的 React 組件代碼 (使用 Tailwind CSS)" },
-          explanation: { type: "STRING", description: "【極簡、一句話】說明這次改動的核心內容（繁體中文）。" }
+          explanation: { type: "STRING", description: "【極簡】說明為何此時需要獲取目錄清單。" },
+          next_step: { type: "STRING", description: "獲取清單後預計執行的下一步分析動作。" }
         },
-        required: ["code", "explanation"]
+        required: ["explanation", "next_step"]
+      }
+    },
+    {
+      name: "read_file_content",
+      description: "讀取專案內特定檔案內容進行深度分析。需說明讀取原因與接下來的計畫。",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          path: { type: "STRING", description: "檔案路徑 (例如: src/sandbox/Target.tsx)" },
+          explanation: { type: "STRING", description: "【極簡】說明為何此時需要調閱此檔案內容。" },
+          next_step: { type: "STRING", description: "讀取並分析內容後，預計要執行的下一步動作。" }
+        },
+        required: ["path", "explanation", "next_step"]
+      }
+    },
+    {
+      name: "update_ui",
+      description: "修改現有代碼或產出全新的組件。遵循極簡沙盒規範。",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          code: { 
+            type: "STRING", 
+            description: "完整的 React 組件代碼。規範：\n1. 絕對禁止 import。\n2. 僅限一個名為 App 的組件。\n3. 無須 export。\n4. 僅限 React 18 語法與 Tailwind CSS。\n5. 不支援第三方圖示，請用 Emoji 或 Tailwind 組件圖形。" 
+          },
+          explanation: { type: "STRING", description: "【極簡】說明本次 UI 變更的核心邏輯與設計重點。" },
+          next_step: { type: "STRING", description: "UI 產出/修復後，預計的後續開發動作。" }
+        },
+        required: ["code", "explanation", "next_step"]
       }
     },
     {
       name: "update_framework",
-      description: "當專案方向改變、加入新技術架構或規範需更新時，呼叫此功能修改 Framework.md 分析內容。",
+      description: "當專案方向變更、加入新技術架構或規範需更新時，修改 Framework.md。需明確說明下一步計畫。",
       parameters: {
         type: "OBJECT",
         properties: {
-          new_content: { type: "STRING", description: "更新後的 Framework.md 繁體中文分析內容。" }
+          new_content: { type: "STRING", description: "更新後的 Framework.md 繁體中文內容。" },
+          next_step: { type: "STRING", description: "同步手冊後，預計要進行的具體開發任務或下一步目標。" }
         },
-        required: ["new_content"]
+        required: ["new_content", "next_step"]
       }
     },
     {
       name: "reset_project",
-      description: "當專案方向與之前完全不符時呼叫。此功能會同步更新開發手冊並發送重置信號。",
+      description: "當專案方向徹底改變時呼叫。需同步更新開發手冊、說明重置理由與預計動作。",
       parameters: {
         type: "OBJECT",
         properties: {
-          reason: { type: "STRING", description: "重置與重新規劃的原因說明。" },
-          new_framework_content: { type: "STRING", description: "針對新需求重新編寫的 Framework.md 繁體中文內容。" }
+          reason: { type: "STRING", description: "重置的原因與分析摘要。" },
+          new_framework_content: { type: "STRING", description: "針對新需求重新編寫的 Framework.md 內容。" },
+          next_step: { type: "STRING", description: "重置並規劃後，立刻要執行的開發首要任務。" }
         },
-        required: ["reason", "new_framework_content"]
-      }
-    },
-    {
-      name: "send_message",
-      description: "單純詢問問題、聊天、規劃或進度回報時呼叫代碼時呼叫。",
-      parameters: {
-        type: "OBJECT",
-        properties: {
-          text: { type: "STRING", description: "回傳給使用者的文字內容" }
-        },
-        required: ["text"]
+        required: ["reason", "new_framework_content", "next_step"]
       }
     }
   ]
@@ -107,10 +127,11 @@ class ToolRegistry {
   constructor() {
     this.handlers = new Map();
     this.priorities = {
-      "update_framework": 10,
-      "reset_project": 20,
-      "update_ui": 30,
-      "send_message": 40
+      "list_sandbox_files": 4,  // 列出清單最優先
+      "read_file_content": 5,   // 分析特定檔案
+      "update_framework": 10,  // 規範優先
+      "reset_project": 20,     // 重置居中
+      "update_ui": 30          // 實作最後
     };
   }
 
@@ -119,7 +140,6 @@ class ToolRegistry {
   }
 
   async execute(toolCalls, context = {}) {
-    // 依優先順序排序
     const sorted = [...toolCalls].sort((a, b) => {
       const pA = this.priorities[a.name] || 99;
       const pB = this.priorities[b.name] || 99;
@@ -131,17 +151,12 @@ class ToolRegistry {
     for (const call of sorted) {
       const handler = this.handlers.get(call.name);
       if (handler) {
-        console.log(`[Tool] 正在執行: ${call.name} (優先級: ${this.priorities[call.name] || 99})`);
         const result = await handler(call.args, context);
         results.push({ name: call.name, ...result });
-        
-        // 檢查是否由 Handler 觸發連鎖請求
         if (result.triggerNext) {
           chainStatus.triggerNext = true;
           chainStatus.nextPrompt = result.nextPrompt;
         }
-      } else {
-        console.warn(`[Tool] 找不到處理常式: ${call.name}`);
       }
     }
     return { results, chainStatus };
@@ -150,105 +165,97 @@ class ToolRegistry {
 
 const registry = new ToolRegistry();
 
+// 註冊：清單讀取
+registry.register("list_sandbox_files", async (args, { onChunk, currentPrompt }) => {
+  try {
+    const sandboxDir = path.join(__dirname, '../src/sandbox/');
+    const files = await fs.readdir(sandboxDir);
+    onChunk(`📡 **執行目錄清單讀取：** \n`);
+    onChunk(`✅ **原因：** ${args.explanation}\n\n`);
+    const fileList = files.join(', ');
+    onChunk(`✅ **已獲取清單：** ${fileList}\n`);
+    onChunk(`⏭️ **下一步：** ${args.next_step}\n\n`);
+    
+    return { 
+      success: true, 
+      triggerNext: true, 
+      nextPrompt: `${currentPrompt}\n---\n【目錄清單】：[${fileList}]\n目前分析理由：${args.explanation}\n下一步計畫：${args.next_step}` 
+    };
+  } catch (err) {
+    return { success: false, nextPrompt: `清單獲取失敗：${err.message}` };
+  }
+});
+
+// 註冊：讀取檔案內容並針對性分析
+registry.register("read_file_content", async (args, { onChunk, currentPrompt }) => {
+  try {
+    const absPath = path.isAbsolute(args.path) ? args.path : path.join(__dirname, '../', args.path);
+    const content = await fs.readFile(absPath, 'utf8');
+    onChunk(`🔍 **分析檔案：** \`${args.path}\`\n`);
+    onChunk(`✅ **原因：** ${args.explanation}\n`);
+    onChunk(`⏭️ **下一步：** ${args.next_step}\n\n`);
+    return {
+      success: true,
+      triggerNext: true,
+      nextPrompt: `${currentPrompt}\n---\n【檔案內容：${args.path}】\n${content}\n---\n原因：${args.explanation}\n計畫：${args.next_step}`
+    };
+  } catch (err) {
+    return { success: false, nextPrompt: `讀取檔案「${args.path}」失敗：${err.message}` };
+  }
+});
+
 // 註冊：更新架構
-registry.register("update_framework", async (args, context) => {
+registry.register("update_framework", async (args, { onChunk, allCalls }) => {
   if (args.new_content) await fs.writeFile(FRAMEWORK_FILE, args.new_content, 'utf8');
-  
-  // 如果這一輪沒有同時呼叫 update_ui，則觸發自動跟進
-  const hasUiCall = context.allCalls.some(c => c.name === "update_ui");
-  return { 
-    success: true, 
-    triggerNext: !hasUiCall, 
-    nextPrompt: "已更新開發手冊 (Framework.md)，請立即根據最新的開發規範產出對應的 App.tsx 實作代碼。" 
+  onChunk(`📖 **同步手冊：** 規格已更新。下一步：${args.next_step}\n\n`);
+
+  const hasUiCall = allCalls.some(c => c.name === "update_ui");
+  return {
+    success: true,
+    triggerNext: !hasUiCall,
+    nextPrompt: `已更新 Framework.md。下一步計畫是：${args.next_step}。請根據此目標執行下一步動作。`
   };
 });
 
 // 註冊：重置專案
-registry.register("reset_project", async (args, context) => {
+registry.register("reset_project", async (args, { onChunk, allCalls }) => {
   if (args.new_framework_content) {
     await fs.writeFile(FRAMEWORK_FILE, args.new_framework_content, 'utf8');
   }
-  const { onChunk } = context;
-  onChunk(`⚠️ **重置提案：** ${args.reason}\n\n`);
-  onChunk("\n[SIGNAL:RESET_PROPOSAL]\n⚠️ **專案大方向已重置，正在重新生成代碼...**\n\n");
-  
-  const hasUiCall = context.allCalls.some(c => c.name === "update_ui");
-  return { 
-    success: true, 
-    triggerNext: !hasUiCall, 
-    nextPrompt: `專案大方向已重置為「${args.reason}」，已更新 Framework.md，請立即根據新規劃產出對應的代碼實作。` 
+  onChunk(`⚠️ **重置提案：** ${args.reason}\n`);
+  onChunk(`⏭️ **下一步：** ${args.next_step}\n\n`);
+  onChunk("\n[SIGNAL:RESET_PROPOSAL]\n");
+
+  const hasUiCall = allCalls.some(c => c.name === "update_ui");
+  return {
+    success: true,
+    triggerNext: !hasUiCall,
+    nextPrompt: `專案已重置。理由：${args.reason}。下一步計畫是：${args.next_step}。請立即執行。`
   };
 });
 
 // 註冊：更新 UI
 registry.register("update_ui", async (args, { onChunk }) => {
   if (args.code) {
-    if (args.explanation) {
-      onChunk(`🚀 **更新 UI：** ${args.explanation}\n\n`);
-    }
+    onChunk(`🚀 **更新 UI：** ${args.explanation}\n`);
+    onChunk(`⏭️ **下一步：** ${args.next_step}\n\n`);
     await fs.writeFile(TARGET_FILE, args.code, 'utf8');
   }
-  return { success: true, explanation: args.explanation };
+  return { success: true, explanation: args.explanation, next_step: args.next_step };
 });
 
-// 註冊：發送訊息
-registry.register("send_message", async (args) => {
-  return { success: true, text: args.text };
-});
-
-// 自動分析專案內容並初始化框架定義文件 (Framework.md)
+// 基礎專案環境檢查 (不再自動觸發 AI 分析，改由 AI 呼叫工具)
 export async function checkAndInitializeFramework() {
-  if (isAnalyzingFramework) {
-    console.log("[System] 目前已有正在進行中的分析，跳過重複觸發...");
-    return await fs.readFile(FRAMEWORK_FILE, 'utf8');
-  }
-
   try {
     const exists = await fs.pathExists(FRAMEWORK_FILE);
-    let content = "";
-    if (exists) content = await fs.readFile(FRAMEWORK_FILE, 'utf8');
-
-    if (!content.trim()) {
-      isAnalyzingFramework = true;
-      console.log("[System] Framework.md 為空，正在【深度掃描 Sandbox 檔案】並分析專案功能...");
-      
-      const sandboxDir = path.join(__dirname, '../src/sandbox/');
-      const files = await fs.readdir(sandboxDir);
-      let sandboxOverview = "";
-      
-      for (const file of files) {
-        if (file.endsWith('.tsx') || file.endsWith('.ts') || file.endsWith('.js') || file.endsWith('.css')) {
-          const filePath = path.join(sandboxDir, file);
-          const fContent = await fs.readFile(filePath, 'utf8');
-          sandboxOverview += `\n--- File: ${file} ---\n${fContent}\n`;
-        }
-      }
-      
-      const analysisPrompt = `
-      Please analyze the following sandbox code and create a CONCISE Framework.md doc.
-      [Sandbox Implementation Files]
-      ${sandboxOverview}
-      [Instruction]
-      1. 使用「極簡、條列式」撰寫 Framework.md 元數據。
-      2. 分析目前 Sandbox 的【核心功能】與【介面邏輯】。
-      3. 定義未來修改時應遵循的 UI 與程式碼範式。
-      4. Language: 繁體中文 (Traditional Chinese).
-      OUTPUT ONLY THE MARKDOWN CONTENT.
-      `;
-      
-      const result = await model.generateContent(analysisPrompt);
-      const frameworkText = result.response.text();
-      await fs.writeFile(FRAMEWORK_FILE, frameworkText, 'utf8');
-      await recordGeminiResponse(analysisPrompt, frameworkText, "FRAMEWORK_INIT", { frameworkText });
-      console.log("[System] Framework.md 已完成深度掃描分析。");
-      return frameworkText;
+    if (!exists) {
+      await fs.writeFile(FRAMEWORK_FILE, "# Framework.md\n請等待 AI 進行全局掃描後建立規範。", 'utf8');
     }
-    return content;
+    console.log("[System] 專案環境檢查完成。分析主導權已移交給 AI Agent。");
+    return "Ready";
   } catch (error) {
-    console.error("[Error] 無法初始化 Framework.md:", error);
+    console.error("[Error] 環境初始化失敗:", error);
     throw error;
-  } finally {
-    isAnalyzingFramework = false;
   }
 }
 
@@ -263,43 +270,38 @@ export async function streamGeminiSDK(userPrompt, onChunk, onComplete) {
   try {
     while (loopCount < MAX_LOOPS) {
       loopCount++;
-      const currentCode = await fs.readFile(TARGET_FILE, 'utf8').catch(() => "// 尚無代碼");
       const frameworkDocs = await fs.readFile(FRAMEWORK_FILE, 'utf8').catch(() => "// 尚無框架");
+      
+      const systemInstruction = `你是一個具備「思考與執行合一」能力的高級前端工程師 Agent。
+注意：【禁止憑空推論】。如果你的上下文不足以支撐對現有專案實作的精確理解，【必須】立刻呼叫工具進行主動偵查。
 
-      const systemInstruction = `你是一個專業的前端 UI 專家。
-目前專案環境為「極簡化動態 Sandbox」，請嚴格遵守以下代碼架構規範：
-1. **技術棧**: 僅限使用 React 18 (Functional Component) 與 Tailwind CSS。
-2. **圖示限制**: 目前【不支援】Lucide 或任何第三方圖示庫，請改用 Emoji 或 Tailwind 的精美排版與形狀替代圖示需求。
-3. **單一組件**: 所有代碼必須包含在一個名為 \`App\` 的組件內 (例如: const App = () => { ... })。
-4. **無須引進 (No Imports)**: 環境已預載 React 與 Tailwind，請直接撰寫組件邏輯，不要加入 import 語句。
-5. **UI 風格**: 追求高端、精緻且具備現代感的介面設計。
+【專案執行原則】：
+1. **分析先行**: 接收到需求後，若未掌握具體檔案結構或代碼，首動動作一定是 \`list_sandbox_files\` 並選擇性讀取關鍵檔案。
+2. **規格一致性**: 所有的代碼產出必須符合下方列出的 Framework.md 規範。
+3. **透明度**: 所有說明與分析流程請一律使用【繁體中文】。
 
-以下是專案的【開發規範文件 (Framework.md)】：
+【執行 SOP 流程】：
+1. **主動偵查 (Discovery Step)**: 當不知道專案內容或代碼細節時，主動使用 \`list_sandbox_files\` 與 \`read_file_content\`。
+2. **精確執行 (Implementation Step)**: 使用 \`update_ui\` 實作代碼。
+3. **下一步執行計畫 (Planning Step)**: 每次回應必須包含後續動作的規劃。
+
+你可以選擇多個工具【依序執行】。目前已停用單純文字對話，請務必透過工具執行來推進任務。
+
+【開發規範文件 (Framework.md)】：
 ---
 ${frameworkDocs}
----
-
-使用者目前的【程式碼】如下：
----
-${currentCode}
----
-
-根據需求，你可以選擇：
-1. 使用 update_ui 修改現有代碼或生成新動態組件。
-2. 使用 update_framework 更新開發規範文檔。
-3. 使用 send_message 回答問題、規劃進度。
-4. 【重要提案】若大改方向，請呼叫 reset_project 回傳重置提案與規畫。
-【連動指令】：如果你進行了架構調整，請在同一次回應中接著呼叫 update_ui 產出對應的代碼。`;
+---`;
 
       console.log(`[Flow] 執行階段 (Loop ${loopCount}): ${currentPrompt.slice(0, 50)}...`);
-      
+
       const result = await model.generateContentStream({
         contents: [{ role: "user", parts: [{ text: `${systemInstruction}\nUser Request: ${currentPrompt}` }] }]
       });
 
       let toolCalls = [];
-      let lastSentLength = 0;
       let fullOutput = "";
+      let lastExplanationLength = 0; // 用於追蹤 explanation 的串流進度
+      let hasSentToolHint = false;
 
       for await (const chunk of result.stream) {
         const cand = chunk.candidates?.[0];
@@ -307,9 +309,16 @@ ${currentCode}
         for (const part of cand.content.parts) {
           if (part.functionCall) {
             toolCalls.push({ name: part.functionCall.name, args: part.functionCall.args });
-            if (part.functionCall.args.text) {
-              const delta = part.functionCall.args.text.slice(lastSentLength);
-              if (delta) { onChunk(delta); fullOutput += delta; lastSentLength = part.functionCall.args.text.length; }
+
+            // 處理 explanation 的即時回顯
+            const args = part.functionCall.args;
+            if (args.explanation) {
+              if (!hasSentToolHint) { onChunk(`🚀 **正在執行：** `); hasSentToolHint = true; }
+              const delta = args.explanation.slice(lastExplanationLength);
+              if (delta) {
+                onChunk(delta);
+                lastExplanationLength = args.explanation.length;
+              }
             }
           } else if (part.text) {
             onChunk(part.text);
@@ -318,12 +327,28 @@ ${currentCode}
         }
       }
 
-      const { results, chainStatus } = await registry.execute(toolCalls, { onChunk, onComplete, allCalls: toolCalls });
-      
+      // --- 若本輪沒有任何 Tool Call，直接回傳文字並跳出迴圈 ---
+      if (toolCalls.length === 0) {
+        await recordGeminiResponse(currentPrompt, fullOutput, "TEXT", { text: fullOutput });
+        break;
+      }
+
+      // --- 進入工具處理系統，傳入 currentPrompt 以供連鎖決定 ---
+      const { results, chainStatus } = await registry.execute(toolCalls, { 
+        onChunk, 
+        onComplete, 
+        allCalls: toolCalls, 
+        currentPrompt 
+      });
+
       const uiRes = results.find(r => r.name === "update_ui");
-      const msgRes = results.find(r => r.name === "send_message");
-      const finalDisplay = msgRes?.text || fullOutput || (uiRes ? (uiRes.explanation || "UI 更新完畢。") : `Step ${loopCount} 完成。`);
-      
+      const frameworkRes = results.find(r => r.name === "update_framework" || r.name === "reset_project");
+
+      const finalDisplay = fullOutput ||
+        (uiRes ? `✅ UI 更新完成。下一步：${uiRes.next_step}` :
+          (frameworkRes ? `✅ 規格已同步。下一步：${frameworkRes.next_step}` :
+            `第 ${loopCount} 步執行完畢。`));
+
       await recordGeminiResponse(currentPrompt, finalDisplay, "TOOL_STEP", { calls: toolCalls, results });
 
       if (chainStatus.triggerNext && loopCount < MAX_LOOPS) {
