@@ -48,9 +48,9 @@ const tools = [{
       parameters: {
         type: "OBJECT",
         properties: {
-          code: { 
-            type: "STRING", 
-            description: "完整的 React 組件代碼。規範：\n1. 絕對禁止 import。\n2. 僅限一個名為 App 的組件。\n3. 無須 export。\n4. 僅限 React 18 語法與 Tailwind CSS。\n5. 不支援第三方圖示，請用 Emoji 或 Tailwind 組件圖形。" 
+          code: {
+            type: "STRING",
+            description: "完整的 React 組件代碼。規範：\n1. 絕對禁止 import。\n2. 僅限一個名為 App 的組件。\n3. 無須 export。\n4. 僅限 React 18 語法與 Tailwind CSS。\n5. 不支援第三方圖示，請用 Emoji 或 Tailwind 組件圖形。"
           },
           explanation: { type: "STRING", description: "【極簡】說明本次 UI 變更的核心邏輯與設計重點。" },
           next_step: { type: "STRING", description: "UI 產出/修復後，預計的後續開發動作。" }
@@ -71,16 +71,16 @@ const tools = [{
       }
     },
     {
-      name: "reset_project",
-      description: "當專案方向徹底改變時呼叫。需同步更新開發手冊、說明重置理由與預計動作。",
+      name: "plan",
+      description: "當接收到的需求過於龐大、複雜或涉及多階段變動時呼叫。進行全局架構分析、步驟拆解並更新開發手冊以明確後續計畫。",
       parameters: {
         type: "OBJECT",
         properties: {
-          reason: { type: "STRING", description: "重置的原因與分析摘要。" },
-          new_framework_content: { type: "STRING", description: "針對新需求重新編寫的 Framework.md 內容。" },
-          next_step: { type: "STRING", description: "重置並規劃後，立刻要執行的開發首要任務。" }
+          analysis: { type: "STRING", description: "針對大型任務的現狀分析、困難點與拆解邏輯。" },
+          updated_framework: { type: "STRING", description: "根據拆解後的計畫，重新編寫或增修 Framework.md 的內容。" },
+          next_steps_plan: { type: "STRING", description: "列出具體的執行隊列，明確分階段實作的第一步目標。" }
         },
-        required: ["reason", "new_framework_content", "next_step"]
+        required: ["analysis", "updated_framework", "next_steps_plan"]
       }
     }
   ]
@@ -130,7 +130,7 @@ class ToolRegistry {
       "list_sandbox_files": 4,  // 列出清單最優先
       "read_file_content": 5,   // 分析特定檔案
       "update_framework": 10,  // 規範優先
-      "reset_project": 20,     // 重置居中
+      "plan": 20,              // 任務規劃優先度居中
       "update_ui": 30          // 實作最後
     };
   }
@@ -170,19 +170,25 @@ registry.register("list_sandbox_files", async (args, { onChunk, currentPrompt })
   try {
     const sandboxDir = path.join(__dirname, '../src/sandbox/');
     const files = await fs.readdir(sandboxDir);
-    onChunk(`📡 **執行目錄清單讀取：** \n`);
-    onChunk(`✅ **原因：** ${args.explanation}\n\n`);
-    const fileList = files.join(', ');
-    onChunk(`✅ **已獲取清單：** ${fileList}\n`);
-    onChunk(`⏭️ **下一步：** ${args.next_step}\n\n`);
-    
-    return { 
-      success: true, 
-      triggerNext: true, 
-      nextPrompt: `${currentPrompt}\n---\n【目錄清單】：[${fileList}]\n目前分析理由：${args.explanation}\n下一步計畫：${args.next_step}` 
+    onChunk({ type: 'status', message: `📡 正在讀取目錄：${args.explanation}` });
+
+    const fullPaths = files.map(file => path.join('src/sandbox', file).replace(/\\/g, '/'));
+    const fileList = fullPaths.join(', ');
+
+    onChunk({ isNew: true });
+    onChunk({ chunk: `✅ **清單獲取：** [${fileList}]\n⏭️ **計畫：** ${args.next_step}` });
+
+    return {
+      success: true,
+      triggerNext: true,
+      nextPrompt: `${currentPrompt}\n---\n【目錄清單】：[${fileList}]\n目前分析理由：${args.explanation}\n下一步計畫：${args.next_step}`
     };
   } catch (err) {
-    return { success: false, nextPrompt: `清單獲取失敗：${err.message}` };
+    return {
+      success: false,
+      triggerNext: true,
+      nextPrompt: `${currentPrompt}\n---\n【系統錯誤】目錄清單獲取失敗：${err.message}\n請嘗試其他方式或檢查目錄是否存在。`
+    };
   }
 });
 
@@ -191,23 +197,31 @@ registry.register("read_file_content", async (args, { onChunk, currentPrompt }) 
   try {
     const absPath = path.isAbsolute(args.path) ? args.path : path.join(__dirname, '../', args.path);
     const content = await fs.readFile(absPath, 'utf8');
-    onChunk(`🔍 **分析檔案：** \`${args.path}\`\n`);
-    onChunk(`✅ **原因：** ${args.explanation}\n`);
-    onChunk(`⏭️ **下一步：** ${args.next_step}\n\n`);
+    onChunk({ type: 'status', message: `🔍 正在分析：${args.path} (${args.explanation})` });
+    onChunk({ isNew: true });
+    onChunk({ chunk: `✅ **分析完成：** \`${args.path}\`\n⏭️ **計畫：** ${args.next_step}` });
     return {
       success: true,
       triggerNext: true,
       nextPrompt: `${currentPrompt}\n---\n【檔案內容：${args.path}】\n${content}\n---\n原因：${args.explanation}\n計畫：${args.next_step}`
     };
   } catch (err) {
-    return { success: false, nextPrompt: `讀取檔案「${args.path}」失敗：${err.message}` };
+    onChunk({ isNew: true });
+    onChunk({ chunk: `❌ **讀取失敗：** \`${args.path}\` - ${err.message}\n\n` });
+    return {
+      success: false,
+      triggerNext: true,
+      nextPrompt: `${currentPrompt}\n---\n【系統錯誤】讀取檔案「${args.path}」失敗：${err.message}\n請檢查路徑是否正確，或嘗試 \`list_sandbox_files\` 確認檔案存在。`
+    };
   }
 });
 
 // 註冊：更新架構
 registry.register("update_framework", async (args, { onChunk, allCalls }) => {
   if (args.new_content) await fs.writeFile(FRAMEWORK_FILE, args.new_content, 'utf8');
-  onChunk(`📖 **同步手冊：** 規格已更新。下一步：${args.next_step}\n\n`);
+  onChunk({ type: 'status', message: `📖 已同步手冊：${args.next_step}` });
+  onChunk({ isNew: true });
+  onChunk({ chunk: `✅ **手冊已更新**\n⏭️ **計畫：** ${args.next_step}` });
 
   const hasUiCall = allCalls.some(c => c.name === "update_ui");
   return {
@@ -217,29 +231,31 @@ registry.register("update_framework", async (args, { onChunk, allCalls }) => {
   };
 });
 
-// 註冊：重置專案
-registry.register("reset_project", async (args, { onChunk, allCalls }) => {
-  if (args.new_framework_content) {
-    await fs.writeFile(FRAMEWORK_FILE, args.new_framework_content, 'utf8');
+// 註冊：任務拆解與規劃
+registry.register("plan", async (args, { onChunk, allCalls }) => {
+  if (args.updated_framework) {
+    await fs.writeFile(FRAMEWORK_FILE, args.updated_framework, 'utf8');
   }
-  onChunk(`⚠️ **重置提案：** ${args.reason}\n`);
-  onChunk(`⏭️ **下一步：** ${args.next_step}\n\n`);
-  onChunk("\n[SIGNAL:RESET_PROPOSAL]\n");
+  onChunk({ type: 'status', message: `🧩 正在進行全局規劃：${args.analysis}` });
+  onChunk({ isNew: true });
+  onChunk({ chunk: `🎯 **規劃完成**\n⏭️ **當前目標：** ${args.next_steps_plan}` });
+  onChunk({ chunk: "\n[SIGNAL:PLAN_GENERATED]\n" });
 
   const hasUiCall = allCalls.some(c => c.name === "update_ui");
   return {
     success: true,
     triggerNext: !hasUiCall,
-    nextPrompt: `專案已重置。理由：${args.reason}。下一步計畫是：${args.next_step}。請立即執行。`
+    nextPrompt: `規劃已生效。分析：${args.analysis}。第一步預計執行計畫：${args.next_steps_plan}。請立即按照該計畫啟動第一階段任務。`
   };
 });
 
 // 註冊：更新 UI
 registry.register("update_ui", async (args, { onChunk }) => {
   if (args.code) {
-    onChunk(`🚀 **更新 UI：** ${args.explanation}\n`);
-    onChunk(`⏭️ **下一步：** ${args.next_step}\n\n`);
+    onChunk({ type: 'status', message: `🚀 正在套用 UI 變更：${args.explanation}` });
     await fs.writeFile(TARGET_FILE, args.code, 'utf8');
+    onChunk({ isNew: true });
+    onChunk({ chunk: `✨ **UI 已更新：** ${args.explanation}\n⏭️ **計畫：** ${args.next_step}` });
   }
   return { success: true, explanation: args.explanation, next_step: args.next_step };
 });
@@ -259,19 +275,26 @@ export async function checkAndInitializeFramework() {
   }
 }
 
-// 核心串流處理解析器 (支援連鎖請求)
-export async function streamGeminiSDK(userPrompt, onChunk, onComplete) {
-  if (isProcessBusy) { onChunk('\n[系統提示]：伺服器忙碌中...\n'); onComplete(); return; }
+// 核心串流處理解析器 (支援連鎖請求與中斷)
+export async function streamGeminiSDK(userPrompt, onChunk, onComplete, getIsAborted) {
+  if (isProcessBusy) { onChunk({ chunk: '\n[系統提示]：伺服器忙碌中...\n' }); onComplete(); return; }
   isProcessBusy = true;
   let loopCount = 0;
   const MAX_LOOPS = 3;
   let currentPrompt = userPrompt;
 
+  // 初始發送一個新泡泡信號
+  onChunk({ isNew: true });
+
   try {
     while (loopCount < MAX_LOOPS) {
+      if (getIsAborted && getIsAborted()) {
+        console.log("[Flow] 後端偵測到中斷，終止執行。");
+        break;
+      }
       loopCount++;
       const frameworkDocs = await fs.readFile(FRAMEWORK_FILE, 'utf8').catch(() => "// 尚無框架");
-      
+
       const systemInstruction = `你是一個具備「思考與執行合一」能力的高級前端工程師 Agent。
 注意：【禁止憑空推論】。如果你的上下文不足以支撐對現有專案實作的精確理解，【必須】立刻呼叫工具進行主動偵查。
 
@@ -304,6 +327,10 @@ ${frameworkDocs}
       let hasSentToolHint = false;
 
       for await (const chunk of result.stream) {
+        if (getIsAborted && getIsAborted()) {
+          console.log("[Flow] 生成過程中偵測到中斷。");
+          break;
+        }
         const cand = chunk.candidates?.[0];
         if (!cand?.content?.parts) continue;
         for (const part of cand.content.parts) {
@@ -313,15 +340,11 @@ ${frameworkDocs}
             // 處理 explanation 的即時回顯
             const args = part.functionCall.args;
             if (args.explanation) {
-              if (!hasSentToolHint) { onChunk(`🚀 **正在執行：** `); hasSentToolHint = true; }
-              const delta = args.explanation.slice(lastExplanationLength);
-              if (delta) {
-                onChunk(delta);
-                lastExplanationLength = args.explanation.length;
-              }
+              onChunk({ type: 'status', message: `🚀 正在準備：${args.explanation}` });
+              lastExplanationLength = args.explanation.length;
             }
           } else if (part.text) {
-            onChunk(part.text);
+            onChunk({ chunk: part.text });
             fullOutput += part.text;
           }
         }
@@ -334,15 +357,15 @@ ${frameworkDocs}
       }
 
       // --- 進入工具處理系統，傳入 currentPrompt 以供連鎖決定 ---
-      const { results, chainStatus } = await registry.execute(toolCalls, { 
-        onChunk, 
-        onComplete, 
-        allCalls: toolCalls, 
-        currentPrompt 
+      const { results, chainStatus } = await registry.execute(toolCalls, {
+        onChunk,
+        onComplete,
+        allCalls: toolCalls,
+        currentPrompt
       });
 
       const uiRes = results.find(r => r.name === "update_ui");
-      const frameworkRes = results.find(r => r.name === "update_framework" || r.name === "reset_project");
+      const frameworkRes = results.find(r => r.name === "update_framework" || r.name === "plan");
 
       const finalDisplay = fullOutput ||
         (uiRes ? `✅ UI 更新完成。下一步：${uiRes.next_step}` :
@@ -359,7 +382,8 @@ ${frameworkDocs}
     }
   } catch (error) {
     console.error(`[Error]: ${error.message}`);
-    onChunk(`\n[Server Error]: ${error.message}\n`);
+    onChunk({ isNew: true });
+    onChunk({ chunk: `\n[Server Error]: ${error.message}\n` });
   } finally {
     setTimeout(() => { isProcessBusy = false; onComplete(); }, COOLDOWN_MS);
   }

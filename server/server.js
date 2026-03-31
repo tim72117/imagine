@@ -32,18 +32,29 @@ app.get('/api/update-ui-stream', (req, res) => {
   console.log(`${new Date().toLocaleString()}`);
   console.log('#'.repeat(50));
 
+  let isAborted = false;
+  req.on('close', () => {
+    isAborted = true;
+    console.log(`[SSE] 用戶已離線 (Aborted: ${prompt.slice(0, 20)}...)`);
+  });
+
   // 立即發送心跳，確保連線建立
   res.write(': heartbeat\n\n');
 
   streamGeminiSDK(
     prompt,
-    (chunk) => {
-      res.write(`data: ${JSON.stringify({ chunk })}\n\n`);
+    (data) => {
+      if (isAborted) return;
+      // data 可以是 { chunk: "..." } 或 { isNew: true }
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
     },
     () => {
-      res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
-      res.end();
-    }
+      if (!isAborted) {
+        res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+        res.end();
+      }
+    },
+    () => isAborted
   );
 });
 

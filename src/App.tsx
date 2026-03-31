@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, Suspense } from 'react';
-import { Send, MessageSquare, Layout, Layers, RefreshCw, Smartphone, Monitor, Loader2 } from 'lucide-react';
+import { Send, MessageSquare, Layout, Layers, RefreshCw, Smartphone, Monitor, Loader2, Square } from 'lucide-react';
 import { motion } from 'framer-motion';
 import axios from 'axios';
 import ReactMarkdown from 'react-markdown';
@@ -33,7 +33,7 @@ function SandboxIframe({ code, isLoading }: { code: string, isLoading: boolean }
         root.render(<App />);
       } catch (err) {
         console.error("Iframe Render Error:", err);
-        document.getElementById('root').innerHTML = 
+        document.getElementById('root').innerHTML =
           '<div style="padding: 2rem; color: #ef4444; background: #fee2e2; border: 1px solid #fecaca; border-radius: 0.5rem; margin: 1rem;">' +
             '<h3 style="margin-top:0">渲染發生錯誤</h3>' +
             '<pre style="white-space: pre-wrap; font-size: 0.875rem;">' + (err.message || '未知錯誤') + '</pre>' +
@@ -43,7 +43,7 @@ function SandboxIframe({ code, isLoading }: { code: string, isLoading: boolean }
   </body>
 </html>
     `;
-    
+
     iframeRef.current.srcdoc = iframeHtml;
   }, [code, isLoading]);
 
@@ -55,9 +55,9 @@ function SandboxIframe({ code, isLoading }: { code: string, isLoading: boolean }
           <p className="text-zinc-600 font-medium">即時渲染中...</p>
         </div>
       )}
-      <iframe 
-        ref={iframeRef} 
-        title="Sandbox" 
+      <iframe
+        ref={iframeRef}
+        title="Sandbox"
         className="w-full h-full border-none"
         sandbox="allow-scripts allow-modals allow-popups"
       />
@@ -76,12 +76,14 @@ export default function App() {
     { role: 'ai', content: '您好！我是您的 UI 開發小助手。請問您想對左側的介面做什麼樣的調整呢？', timestamp: new Date().toLocaleTimeString() }
   ]);
   const [input, setInput] = useState('');
+  const [statusMessage, setStatusMessage] = useState('正在生成介面代碼...');
   const [isProcessing, setIsProcessing] = useState(false);
   const [previewMode, setPreviewMode] = useState<'desktop' | 'mobile'>('desktop');
-  
+
   const [code, setCode] = useState<string>('');
   const [isLoadingCode, setIsLoadingCode] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   const fetchLatestCode = async () => {
     try {
@@ -100,6 +102,7 @@ export default function App() {
     }
   };
 
+  // 僅在組件掛載時初始化
   useEffect(() => {
     const initFramework = async () => {
       try {
@@ -110,25 +113,49 @@ export default function App() {
       }
     };
     initFramework();
-    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  }, []);
+
+  // 當訊息更新時自動捲動
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
   }, [messages]);
 
+  const handleCancel = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+  };
+
   const handleSend = async () => {
-    if (!input.trim() || isProcessing) return;
+    // 如果正在處理中，按鈕功能切換為「取消」
+    if (isProcessing) {
+      handleCancel();
+      return;
+    }
+
+    if (!input.trim()) return;
     const userMsg: Message = { role: 'user', content: input, timestamp: new Date().toLocaleTimeString() };
     setMessages(prev => [...prev, userMsg]);
-    const aiPlaceholder: Message = { role: 'ai', content: '', timestamp: new Date().toLocaleTimeString() };
-    setMessages(prev => [...prev, aiPlaceholder]);
     const currentInput = input;
     setInput('');
     setIsProcessing(true);
+    setStatusMessage('正在連線至 AI 代理...');
+
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
 
     try {
-      const response = await fetch(`http://localhost:3002/api/update-ui-stream?prompt=${encodeURIComponent(currentInput)}`);
+      const response = await fetch(`http://localhost:3002/api/update-ui-stream?prompt=${encodeURIComponent(currentInput)}`, {
+        signal: controller.signal
+      });
       if (!response.body) return;
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let accumulatedContent = '';
+
       while (true) {
         const { value, done } = await reader.read();
         if (done) {
@@ -144,28 +171,59 @@ export default function App() {
               const cleanedLine = line.replace('data: ', '').trim();
               if (!cleanedLine) continue;
               const data = JSON.parse(cleanedLine);
+
               if (data.done) {
                 await fetchLatestCode();
                 break;
               }
+
+              // 處理狀態訊號
+              if (data.type === 'status') {
+                setStatusMessage(data.message);
+                continue;
+              }
+
+              // 處理新泡泡訊號
+              if (data.isNew) {
+                accumulatedContent = ''; // 重置內容累加器
+                setMessages(prev => [
+                  ...prev,
+                  { role: 'ai', content: '', timestamp: new Date().toLocaleTimeString() }
+                ]);
+                continue;
+              }
+
               if (data.chunk) {
                 accumulatedContent += data.chunk;
                 setMessages(prev => {
                   const updated = [...prev];
                   const lastIdx = updated.length - 1;
-                  if (updated[lastIdx].role === 'ai') updated[lastIdx].content = accumulatedContent;
+                  // 確保只更新最後一個 AI 泡泡
+                  if (updated[lastIdx].role === 'ai') {
+                    updated[lastIdx].content = accumulatedContent;
+                  } else {
+                    // 如果最後一個不是 AI (理論上不應發生)，則新增一個
+                    updated.push({ role: 'ai', content: accumulatedContent, timestamp: new Date().toLocaleTimeString() });
+                  }
                   return updated;
                 });
               }
-            } catch (e) {}
+            } catch (e) { }
           }
         }
       }
-    } catch (err) {
-      console.error(err);
-      setMessages(prev => [...prev, { role: 'ai', content: '串流發生錯誤，請重試。', timestamp: new Date().toLocaleTimeString() }]);
+    } catch (err: any) {
+      if (err.name === 'AbortError') {
+        console.log('Request aborted');
+        setMessages(prev => [...prev, { role: 'ai', content: '_（已由使用者取消產生）_', timestamp: new Date().toLocaleTimeString() }]);
+      } else {
+        console.error(err);
+        setMessages(prev => [...prev, { role: 'ai', content: '串流發生錯誤，請重試。', timestamp: new Date().toLocaleTimeString() }]);
+      }
     } finally {
       setIsProcessing(false);
+      abortControllerRef.current = null;
+      setStatusMessage('正在生成介面代碼...');
     }
   };
 
@@ -182,13 +240,13 @@ export default function App() {
               <h2 className="text-xl font-bold tracking-tight text-white">AI 即時渲染 / Sandbox (Minimal React)</h2>
             </div>
             <div className="flex bg-zinc-900 border border-white/10 p-1 rounded-xl">
-              <button 
+              <button
                 onClick={() => setPreviewMode('desktop')}
                 className={`flex items-center gap-2 px-4 py-1.5 rounded-lg text-sm transition-all ${previewMode === 'desktop' ? 'bg-white/10 text-white shadow-md' : 'text-zinc-500 hover:text-zinc-300'}`}
               >
                 <Monitor className="w-4 h-4" /> Desktop
               </button>
-              <button 
+              <button
                 onClick={() => setPreviewMode('mobile')}
                 className={`flex items-center gap-2 px-4 py-1.5 rounded-lg text-sm transition-all ${previewMode === 'mobile' ? 'bg-white/10 text-white shadow-md' : 'text-zinc-500 hover:text-zinc-300'}`}
               >
@@ -197,7 +255,7 @@ export default function App() {
             </div>
           </header>
           <main className="flex-1 overflow-y-auto overflow-x-hidden flex items-start justify-center pt-8">
-            <motion.div 
+            <motion.div
               layout
               className={`${previewMode === 'mobile' ? 'w-[375px]' : 'w-full max-w-6xl'} transition-all duration-500`}
             >
@@ -223,17 +281,16 @@ export default function App() {
 
           <div ref={scrollRef} className="flex-1 overflow-y-auto p-6 space-y-6 flex flex-col custom-scrollbar">
             {messages.map((msg, i) => (
-              <motion.div 
+              <motion.div
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
-                key={i} 
+                key={i}
                 className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}
               >
-                <div className={`p-4 rounded-2xl max-w-[85%] text-sm leading-relaxed shadow-lg markdown-content ${
-                  msg.role === 'user' 
-                  ? 'bg-blue-600 text-white rounded-tr-none' 
-                  : 'bg-white/5 text-zinc-200 border border-white/5 rounded-tl-none'
-                }`}>
+                <div className={`p-4 rounded-2xl max-w-[85%] text-sm leading-relaxed shadow-lg markdown-content ${msg.role === 'user'
+                    ? 'bg-blue-600 text-white rounded-tr-none'
+                    : 'bg-white/5 text-zinc-200 border border-white/5 rounded-tl-none'
+                  }`}>
                   <ReactMarkdown>{msg.content}</ReactMarkdown>
                 </div>
                 <span className="text-[10px] text-zinc-600 mt-1 px-1">{msg.timestamp}</span>
@@ -241,7 +298,7 @@ export default function App() {
             ))}
             {isProcessing && (
               <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex items-center gap-2 text-zinc-500 text-xs">
-                <RefreshCw className="w-3 h-3 animate-spin" />正在生成介面代碼...
+                <RefreshCw className="w-3 h-3 animate-spin" />{statusMessage}
               </motion.div>
             )}
           </div>
@@ -260,12 +317,16 @@ export default function App() {
                 placeholder="如何修改介面？ (不再使用圖示圖示庫)"
                 className="w-full bg-white/5 border border-white/10 rounded-2xl px-5 py-4 pr-14 text-sm text-white focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all resize-none group-hover:border-white/20 h-24"
               />
-              <button 
+              <button
                 onClick={handleSend}
-                disabled={!input.trim() || isProcessing}
-                className="absolute right-3 bottom-3 p-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl shadow-lg transition-all disabled:bg-zinc-700 disabled:opacity-50"
+                disabled={!input.trim() && !isProcessing}
+                className={`absolute right-3 bottom-3 p-3 text-white rounded-xl shadow-lg transition-all ${
+                  isProcessing 
+                  ? 'bg-red-500 hover:bg-red-600' 
+                  : 'bg-blue-600 hover:bg-blue-500 disabled:bg-zinc-700 disabled:opacity-50'
+                }`}
               >
-                <Send className="w-4 h-4" />
+                {isProcessing ? <Square className="w-4 h-4 fill-current" /> : <Send className="w-4 h-4" />}
               </button>
             </div>
           </div>
