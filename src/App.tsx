@@ -83,7 +83,7 @@ export default function App() {
   const [code, setCode] = useState<string>('');
   const [isLoadingCode, setIsLoadingCode] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const abortControllerRef = useRef<AbortController | null>(null);
+  const socketRef = useRef<WebSocket | null>(null);
 
   const fetchLatestCode = async () => {
     setIsLoadingCode(true);
@@ -96,148 +96,94 @@ export default function App() {
         raw = raw.replace(/export\s+default\s+/g, 'const App = ');
         setCode(raw);
       }
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setIsLoadingCode(false);
-    }
+    } catch (err) { console.error(err); } finally { setIsLoadingCode(false); }
   };
 
-  // 僅在組件掛載時初始化
   useEffect(() => {
     const initFramework = async () => {
       try {
         await fetch('http://localhost:3002/api/init-framework');
         await fetchLatestCode();
-      } catch (err) {
-        console.error('[Error] 框架初始化失敗:', err);
-      }
+      } catch (err) { console.error('[Error] 初始化失敗:', err); }
     };
     initFramework();
   }, []);
 
-  // 當訊息更新時自動捲動
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [messages]);
 
   const handleCancel = () => {
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      abortControllerRef.current = null;
+    if (socketRef.current) {
+      socketRef.current.close();
+      socketRef.current = null;
     }
   };
 
-  const handleSend = async () => {
-    // 如果正在處理中，按鈕功能切換為「取消」
-    if (isProcessing) {
-      handleCancel();
-      return;
-    }
-
+  const handleSend = () => {
+    if (isProcessing) { handleCancel(); return; }
     if (!input.trim()) return;
+
     const userMsg: Message = { role: 'user', content: input, timestamp: new Date().toLocaleTimeString() };
     setMessages(prev => [...prev, userMsg]);
     const currentInput = input;
     setInput('');
     setIsProcessing(true);
-    setStatusMessage('正在連線至 AI 代理...');
+    setStatusMessage('發送請求至端點...');
 
-    const controller = new AbortController();
-    abortControllerRef.current = controller;
+    // --- WebSocket 切換實作 ---
+    const socket = new WebSocket('ws://localhost:3002');
+    socketRef.current = socket;
+    let accumulatedContent = '';
 
-    try {
-      const response = await fetch(`http://localhost:3002/api/update-ui-stream?prompt=${encodeURIComponent(currentInput)}`, {
-        signal: controller.signal
-      });
-      if (!response.body) return;
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let accumulatedContent = '';
+    socket.onopen = () => {
+      socket.send(JSON.stringify({ prompt: currentInput }));
+    };
 
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) {
-          await fetchLatestCode();
-          break;
+    socket.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+
+        if (data.done) {
+          fetchLatestCode();
+          socket.close();
+          return;
         }
-        const chunkText = decoder.decode(value, { stream: true });
-        const lines = chunkText.split('\n');
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          if (line.startsWith('data: ')) {
-            try {
-              const cleanedLine = line.replace('data: ', '').trim();
-              if (!cleanedLine) continue;
-              const data = JSON.parse(cleanedLine);
 
-              if (data.done) {
-                await fetchLatestCode();
-                break;
-              }
+        if (data.type === 'rendering') { setIsLoadingCode(data.isLoading); return; }
+        if (data.type === 'refresh') { fetchLatestCode(); return; }
+        if (data.type === 'status') { setStatusMessage(data.message); return; }
 
-              // 處理渲染訊號
-              if (data.type === 'rendering' && data.isLoading) {
-                setIsLoadingCode(true);
-                continue;
-              }
-
-              // 處理重刷訊號
-              if (data.type === 'refresh') {
-                fetchLatestCode();
-                continue;
-              }
-
-              // 處理狀態訊號
-              if (data.type === 'status') {
-                setStatusMessage(data.message);
-                continue;
-              }
-
-              // 處理新泡泡訊號
-              if (data.isNew) {
-                accumulatedContent = ''; // 重置內容累加器
-                setMessages(prev => [
-                  ...prev,
-                  { role: 'ai', content: '', timestamp: new Date().toLocaleTimeString() }
-                ]);
-                continue;
-              }
-
-              if (data.chunk) {
-                accumulatedContent += data.chunk;
-                setMessages(prev => {
-                  const updated = [...prev];
-                  const lastIdx = updated.length - 1;
-                  // 確保只更新最後一個 AI 泡泡
-                  if (updated[lastIdx].role === 'ai') {
-                    updated[lastIdx].content = accumulatedContent;
-                  } else {
-                    // 如果最後一個不是 AI (理論上不應發生)，則新增一個
-                    updated.push({ role: 'ai', content: accumulatedContent, timestamp: new Date().toLocaleTimeString() });
-                  }
-                  return updated;
-                });
-              }
-            } catch (e) { }
-          }
+        if (data.isNew) {
+          accumulatedContent = ''; 
+          setMessages(prev => [...prev, { role: 'ai', content: '', timestamp: new Date().toLocaleTimeString() }]);
+          return;
         }
-      }
-    } catch (err: any) {
-      if (err.name === 'AbortError') {
-        console.log('Request aborted');
-        setMessages(prev => [...prev, { role: 'ai', content: '_（已由使用者取消產生）_', timestamp: new Date().toLocaleTimeString() }]);
-      } else {
-        console.error(err);
-        setMessages(prev => [...prev, { role: 'ai', content: '串流發生錯誤，請重試。', timestamp: new Date().toLocaleTimeString() }]);
-      }
-    } finally {
+
+        if (data.chunk) {
+          accumulatedContent += data.chunk;
+          setMessages(prev => {
+            const updated = [...prev];
+            const lastIdx = updated.length - 1;
+            if (updated[lastIdx].role === 'ai') updated[lastIdx].content = accumulatedContent;
+            return updated;
+          });
+        }
+      } catch (e) { console.error('[WS:Parse] Error', e); }
+    };
+
+    socket.onclose = () => {
       setIsProcessing(false);
-      abortControllerRef.current = null;
+      socketRef.current = null;
       setStatusMessage('正在生成介面代碼...');
-    }
+      fetchLatestCode();
+    };
+
+    socket.onerror = (err) => {
+      console.error('[WS:Error]', err);
+      setMessages(prev => [...prev, { role: 'ai', content: '🔴 連線異常，請檢查伺服器狀態。', timestamp: new Date().toLocaleTimeString() }]);
+      setIsProcessing(false);
+    };
   };
 
   return (
@@ -286,7 +232,7 @@ export default function App() {
               <div>
                 <h2 className="text-lg font-bold">AI Agent</h2>
                 <span className="text-xs text-green-500 flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span> 線上狀態
+                  <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span> 線上狀態 (WS)
                 </span>
               </div>
             </div>
