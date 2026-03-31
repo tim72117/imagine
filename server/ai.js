@@ -82,17 +82,6 @@ const tools = [{
                 },
                 required: ["analysis", "updated_framework", "next_steps_plan"]
             }
-        },
-        {
-            name: "bootstrap_request",
-            description: "內部工具。處理初始請求的標準化轉送。",
-            parameters: {
-                type: "OBJECT",
-                properties: {
-                    user_prompt: { type: "STRING", description: "使用者的原始需求。" }
-                },
-                required: ["user_prompt"]
-            }
         }
     ]
 }];
@@ -107,7 +96,7 @@ function getToolDescriptionPrompt() {
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
 const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash", tools: tools });
 
-let isProcessBusy = false;
+
 
 // 紀錄回應資訊的函式 (堆疊式，每小時一個檔案)
 export async function recordGeminiResponse(prompt, output, type = "CHAT", rawData = null) {
@@ -175,7 +164,7 @@ class TaskManager {
             "update_framework": 10,  
             "plan": 20,              
             "update_ui": 30,         
-            "finish_task": 99        
+            "send_message": 99        
         };
     }
 
@@ -216,9 +205,6 @@ class TaskManager {
         if (handler) {
             task.status = 'running';
             console.log(`  [Task] 派發任務: ${task.name} (Task ID: ${task.id})`);
-
-            // 注入當前 Task 實例到 context，方便 handler 內部呼叫 task.addTask 進行衍生
-            context.task = task;
 
             await this.runHooks(task.name, 'before', { toolName: task.name, args: task.args, context, parentTask, task });
 
@@ -350,15 +336,9 @@ registry.register("update_ui", async (args) => {
     return { success: true, explanation: args.explanation, next_step: args.next_step };
 });
 
-// 註冊：任務總結工具 (切斷 chain)
-registry.register("finish_task", async (args) => {
-    return {
-        success: true,
-        triggerNext: false,
-        summary: args.summary,
-        feedback: args.feedback,
-        next_steps: args.next_steps
-    };
+// 註冊：對話發送工具 (切斷 chain)
+registry.register("send_message", async (args) => {
+    return { success: true, triggerNext: false, text: args.text };
 });
 
 // 註冊：初始轉送 (No-Op UI)
@@ -372,7 +352,7 @@ registry.register("bootstrap_request", async (args) => {
 
 // 註冊：執行 AI 推論請求 (將 AI 請求本身包裝為任務)
 registry.register("ai_request", async (args, context) => {
-    const { onChunk, getIsAborted } = context;
+    const { getIsAborted } = context;
     const currentPrompt = args.prompt;
     const derivedTasks = [];
 
@@ -387,10 +367,10 @@ registry.register("ai_request", async (args, context) => {
 3. **透明度**: 所有說明與分析流程請一律使用【繁體中文】。
 
 【執行流程 (SOP)】：
-1. **探索與釐清階段 (Discovery & Clarify)**: 調用偵查工具與 \`list_sandbox_files\`獲取現況。
+1. **探索與釐清階段 (Discovery & Clarify)**: 調用偵查工具與 \`list_sandbox_files\` 獲取現況。
 2. **決議與規劃階段 (Reasoning & Plan)**: 使用 \`plan\` 工具梳理多階段開發步驟。
 3. **執行階段 (Implementation)**: 套用代碼變動或更新手冊內容。
-4. **任務總結 (Conclusion)**: 完成所有變動後，【必須】呼叫 \`finish_task\` 提供彙報並結束連鎖。
+4. **回報階段 (Reporting)**: 完成所有變動後，【必須】呼叫 \`send_message\` 提供彙報並結束連鎖。
 
 ${getToolDescriptionPrompt()}
 
@@ -412,11 +392,9 @@ ${frameworkDocs}
         if (!cand?.content?.parts) continue;
         for (const part of cand.content.parts) {
             if (part.functionCall) {
-                // --- 不再直接修改任務樹，而是收集意圖後回傳 ---
                 derivedTasks.push({ name: part.functionCall.name, args: part.functionCall.args });
             } else if (part.text) {
-                // --- 將對話任務解析為子 Task 意圖 ---
-                derivedTasks.push({ name: "finish_task", args: { summary: part.text } });
+                derivedTasks.push({ name: "send_message", args: { text: part.text } });
             }
         }
     }
@@ -424,26 +402,3 @@ ${frameworkDocs}
     return { success: true, derivedTasks };
 });
 
-// 核心串流處理解析器 (完全透過動態衍生，消滅靜態迴圈)
-export async function streamGeminiSDK(userPrompt, onChunk, onComplete, getIsAborted) {
-    if (isProcessBusy) { onChunk({ chunk: '\n[系統提示]：伺服器忙碌中...\n' }); onComplete(); return; }
-    isProcessBusy = true;
-
-    try {
-        // 直接將最初的啟動請求作為 Root Task
-        const rootTask = registry.createTask("bootstrap_request", { user_prompt: userPrompt });
-
-        console.log(`[Flow] 🚀 啟動動態衍生任務圖 (根節點: bootstrap_request)...`);
-
-        // 直接執行這個根任務，它隨後會動態衍生出所有的子推論與子操作
-        await registry.executeTask(null, rootTask, { 
-            onChunk, 
-            getIsAborted, 
-            loopCount: 0 
-        });
-
-    } finally {
-        isProcessBusy = false;
-        onComplete();
-    }
-}

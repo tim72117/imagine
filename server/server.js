@@ -4,7 +4,6 @@ import dotenv from 'dotenv';
 import fs from 'fs-extra';
 import { WebSocketServer } from 'ws';
 import {
-  streamGeminiSDK,
   registry,
   TARGET_FILE,
   FRAMEWORK_FILE
@@ -80,9 +79,9 @@ registry.on('update_ui', 'after', async ({ args }) => {
   broadcast({ chunk: `✨ **UI 實作完成：** ${args.explanation}\n⏭️ **計畫：** ${args.next_step}` });
 });
 
-registry.on('finish_task', 'after', async ({ args }) => {
+registry.on('send_message', 'after', async ({ args }) => {
   broadcast({ isNew: true });
-  broadcast({ chunk: args.summary }); // 輸出 AI 最終結語
+  broadcast({ chunk: args.text }); // 輸出 AI 最終結語或當前對話
 });
 
 app.use(cors({ origin: '*' }));
@@ -107,6 +106,8 @@ const server = app.listen(PORT, '0.0.0.0', () => {
 
 const wss = new WebSocketServer({ server });
 
+let isProcessBusy = false;
+
 wss.on('connection', (ws) => {
   activeClients.add(ws);
   console.log(`[WS] 連結建立 (目前活躍客戶端: ${activeClients.size})`);
@@ -116,15 +117,27 @@ wss.on('connection', (ws) => {
     try {
       const { prompt } = JSON.parse(message.toString());
       
-      // 測試即時回顯
       ws.send(JSON.stringify({ isNew: true, chunk: `【WS 即時接收確認】：${prompt}` }));
 
-      await streamGeminiSDK(
-        prompt,
-        (data) => { if (!isAborted && ws.readyState === 1) ws.send(JSON.stringify(data)); },
-        () => { if (!isAborted && ws.readyState === 1) ws.send(JSON.stringify({ done: true })); },
-        () => isAborted
-      );
+      if (isProcessBusy) {
+        broadcast({ isNew: true, chunk: '\n[系統提示]：伺服器忙碌中...\n' });
+        return;
+      }
+      isProcessBusy = true;
+
+      try {
+        const rootTask = registry.createTask("bootstrap_request", { user_prompt: prompt });
+        console.log(`[Flow] 🚀 啟動動態衍生任務圖 (根節點: bootstrap_request)...`);
+
+        await registry.executeTask(null, rootTask, { 
+          getIsAborted: () => isAborted, 
+          loopCount: 0 
+        });
+      } finally {
+        isProcessBusy = false;
+        if (!isAborted && ws.readyState === 1) ws.send(JSON.stringify({ done: true }));
+      }
+
     } catch (err) { console.error('[WS Error]', err); }
   });
 
