@@ -138,20 +138,54 @@ export async function recordGeminiResponse(prompt, output, type = "CHAT", rawDat
     }
 }
 
-// --- Tool Handler 封裝 ---
-class ToolRegistry {
+// --- 階層型 Task 領域模型 ---
+class Task {
+    constructor(id, name, args = {}, targetPrompt = null) {
+        this.id = id;
+        this.name = name;
+        this.args = args;
+        this.targetPrompt = targetPrompt; // 若有 prompt 就是高階推論任務
+        this.tasks = []; // 子任務
+        this.status = 'pending';
+        this.result = null;
+        this.createdAt = new Date().toISOString();
+        this.parentTaskId = null; // 關聯父節點/前置節點
+        this.nextTaskId = null;   // 連鎖的下個任務
+    }
+
+    addTask(name, args) {
+        // 子任務 ID 直接繼承父任務
+        const childId = `${this.id}-${this.tasks.length + 1}`;
+        const task = new Task(childId, name, args);
+        this.tasks.push(task);
+        return task;
+    }
+}
+
+class TaskManager {
     constructor() {
         this.handlers = new Map();
-        this.hooks = new Map(); // 用於儲存鉤子函式
+        this.hooks = new Map(); 
+        this.rootTasks = new Map();
         this.priorities = {
             "bootstrap_request": 1,
-            "list_sandbox_files": 4,  // 列出清單
-            "read_file_content": 5,   // 分析特定檔案
-            "update_framework": 10,  // 規範優先
-            "plan": 20,              // 任務規劃
-            "update_ui": 30,         // 實作最後
-            "finish_task": 99        // 任務總結與結案
+            "ai_request": 2,          // 最高優先，發出推論請求並展開新任務
+            "list_sandbox_files": 4, 
+            "read_file_content": 5,   
+            "update_framework": 10,  
+            "plan": 20,              
+            "update_ui": 30,         
+            "finish_task": 99        
         };
+    }
+
+    createTask(name, args = {}, prompt = null) {
+        const id = `TASK-${Date.now()}`;
+        const task = new Task(id, name, args, prompt);
+        task.status = 'active';
+        this.rootTasks.set(id, task);
+        console.log(`\n[Task] 🚀 建立高階任務 (Task ID: ${id})`);
+        return task;
     }
 
     // 註冊鉤子方法
@@ -174,46 +208,79 @@ class ToolRegistry {
         this.handlers.set(toolName, handler);
     }
 
-    async execute(toolCalls, context = {}) {
-        const sorted = [...toolCalls].sort((a, b) => {
-            const pA = this.priorities[a.name] || 99;
-            const pB = this.priorities[b.name] || 99;
-            return pA - pB;
-        });
+    // 支援遞迴的 Task 執行器
+    async executeTask(parentTask, task, context = {}) {
+        const handler = this.handlers.get(task.name);
 
-        let chainStatus = { triggerNext: false, nextPrompt: "" };
-        const results = [];
-        for (const call of sorted) {
-            const handler = this.handlers.get(call.name);
-            if (handler) {
-                // --- 執行 Before 鉤子 ---
-                await this.runHooks(call.name, 'before', { toolName: call.name, args: call.args, context });
+        // 1. 若該任務有對應的 handler (基本工具)，則準備執行
+        if (handler) {
+            task.status = 'running';
+            console.log(`  [Task] 派發任務: ${task.name} (Task ID: ${task.id})`);
 
-                const result = await handler(call.args, context);
-                results.push({ name: call.name, ...result });
+            // 注入當前 Task 實例到 context，方便 handler 內部呼叫 task.addTask 進行衍生
+            context.task = task;
 
-                // --- 原子化錄製：每執行完一個工具就專屬記錄一次，不串接巨大歷史 ---
-                await recordGeminiResponse(
-                    `【工具執行】：${call.name}`,
-                    JSON.stringify({ args: call.args, result }, null, 2),
-                    "TOOL_RESULT",
-                    { tool: call.name, args: call.args }
-                );
+            await this.runHooks(task.name, 'before', { toolName: task.name, args: task.args, context, parentTask, task });
 
-                // --- 執行 After 鉤子 ---
-                await this.runHooks(call.name, 'after', { toolName: call.name, args: call.args, result, context });
+            const result = await handler(task.args, context);
+            task.result = result;
+            task.status = 'completed';
 
-                if (result.triggerNext) {
-                    chainStatus.triggerNext = true;
-                    chainStatus.nextPrompt = result.nextPrompt;
+            await recordGeminiResponse(
+                `【Task 執行】：${task.name}`,
+                JSON.stringify({ parentTaskId: parentTask?.id, taskId: task.id, args: task.args, result }, null, 2),
+                "TASK_RESULT",
+                { parentTaskId: parentTask?.id, taskId: task.id, tool: task.name, args: task.args }
+            );
+
+            await this.runHooks(task.name, 'after', { toolName: task.name, args: task.args, result, context, parentTask, task });
+
+            // --- 統一任務衍生機制 ---
+            
+            // 1. 處理顯式衍生 (由 handler 解析出的多個子任務)
+            if (result.derivedTasks && Array.isArray(result.derivedTasks)) {
+                for (const d of result.derivedTasks) {
+                    task.addTask(d.name, d.args);
+                }
+                console.log(`  [Task] 🧬 從任務 ${task.id} 衍生出 ${result.derivedTasks.length} 個子任務`);
+            }
+
+            // 2. 處理連鎖衍生 (由 handler 宣告的後續推論需求)
+            if (result.triggerNext) {
+                context.loopCount = (context.loopCount || 0) + 1;
+                if (context.loopCount <= 3) {
+                    const targetHostTask = parentTask ? parentTask : task;
+                    targetHostTask.addTask("ai_request", { prompt: result.nextPrompt });
+                    console.log(`  [Task] 🔗 捕獲連鎖推論，於節點 ${targetHostTask.id} 後方掛載新的 ai_request (連鎖深度: ${context.loopCount})`);
+                } else {
+                    console.log(`  [Task] ⚠️ 已達連鎖推論深度上限 (MAX_LOOPS=3)，停止衍生。`);
                 }
             }
+        } else {
+            // 如果沒有 handler，它只是一個複合群組任務 (Composite Task)
+            task.status = 'running';
         }
-        return { results, chainStatus };
+
+        // 2. 動態追蹤並消化它底下的所有遞迴子任務
+        while (true) {
+            const pendingTasks = task.tasks.filter(t => t.status === 'pending');
+            if (pendingTasks.length === 0) break;
+
+            pendingTasks.sort((a,b) => {
+                const pA = this.priorities[a.name] || 99;
+                const pB = this.priorities[b.name] || 99;
+                return pA - pB;
+            });
+
+            const currentSubTask = pendingTasks[0];
+            await this.executeTask(task, currentSubTask, context);
+        }
+
+        if (!handler) task.status = 'completed';
     }
 }
 
-export const registry = new ToolRegistry();
+export const registry = new TaskManager();
 
 // 註冊：清單讀取
 registry.register("list_sandbox_files", async (args, { currentPrompt }) => {
@@ -303,35 +370,15 @@ registry.register("bootstrap_request", async (args) => {
     };
 });
 
-// 核心串流處理解析器 (支援連鎖請求與中斷)
-export async function streamGeminiSDK(userPrompt, onChunk, onComplete, getIsAborted, isRecursive = false) {
-    if (!isRecursive) {
-        if (isProcessBusy) { onChunk({ chunk: '\n[系統提示]：伺服器忙碌中...\n' }); onComplete(); return; }
-        isProcessBusy = true;
+// 註冊：執行 AI 推論請求 (將 AI 請求本身包裝為任務)
+registry.register("ai_request", async (args, context) => {
+    const { onChunk, getIsAborted } = context;
+    const currentPrompt = args.prompt;
+    const derivedTasks = [];
 
-        // 初始處理：手動推入第一次工具呼叫 (bootstrap)，建立純淨的轉送上下文
-        const seed = [{
-            name: "bootstrap_request",
-            args: { user_prompt: userPrompt }
-        }];
-        const { chainStatus } = await registry.execute(seed, { onChunk, currentPrompt: userPrompt });
-        if (chainStatus.triggerNext) userPrompt = chainStatus.nextPrompt; // 更新初始 Prompt
-    }
+    const frameworkDocs = await fs.readFile(FRAMEWORK_FILE, 'utf8').catch(() => "// 尚無框架");
 
-    let loopCount = 0;
-    const MAX_LOOPS = 3;
-    let currentPrompt = userPrompt;
-
-    try {
-        while (loopCount < MAX_LOOPS) {
-            if (getIsAborted && getIsAborted()) {
-                console.log("[Flow] 後端偵測到中斷，終止執行。");
-                break;
-            }
-            loopCount++;
-            const frameworkDocs = await fs.readFile(FRAMEWORK_FILE, 'utf8').catch(() => "// 尚無框架");
-
-            const systemInstruction = `你是一個具備「思考與執行合一」能力的高級前端工程師 Agent。
+    const systemInstruction = `你是一個具備「思考與執行合一」能力的高級前端工程師 Agent。
 注意：【禁止憑空推論】。如果你的上下文不足以支撐對現有專案實作的精確理解，【必須】立刻呼叫工具進行主動偵查。
 
 【專案執行原則】：
@@ -340,59 +387,63 @@ export async function streamGeminiSDK(userPrompt, onChunk, onComplete, getIsAbor
 3. **透明度**: 所有說明與分析流程請一律使用【繁體中文】。
 
 【執行流程 (SOP)】：
-1. **探索與釐清階段 (Discovery & Clarify)**: 調用偵查工具與 \`list_sandbox_files\` 獲取現況。
+1. **探索與釐清階段 (Discovery & Clarify)**: 調用偵查工具與 \`list_sandbox_files\`獲取現況。
 2. **決議與規劃階段 (Reasoning & Plan)**: 使用 \`plan\` 工具梳理多階段開發步驟。
 3. **執行階段 (Implementation)**: 套用代碼變動或更新手冊內容。
 4. **任務總結 (Conclusion)**: 完成所有變動後，【必須】呼叫 \`finish_task\` 提供彙報並結束連鎖。
 
 ${getToolDescriptionPrompt()}
 
-
 【開發規範文件 (Framework.md)】：
 ---
 ${frameworkDocs}
 ---`;
 
-            console.log(`[Flow] 執行階段 (Loop ${loopCount}): ${currentPrompt.slice(0, 50)}...`);
+    const result = await model.generateContentStream({
+        contents: [{ role: "user", parts: [{ text: `${systemInstruction}\nUser Request: ${currentPrompt}` }] }]
+    });
 
-            const result = await model.generateContentStream({
-                contents: [{ role: "user", parts: [{ text: `${systemInstruction}\nUser Request: ${currentPrompt}` }] }]
-            });
-
-            // 移除不必要的陣列與文字緩衝，僅保留連鎖狀態
-            let chainStatus = { triggerNext: false, nextPrompt: "" };
-
-            for await (const chunk of result.stream) {
-                if (getIsAborted && getIsAborted()) {
-                    console.log("[Flow] 生成過程中偵測到中斷。");
-                    break;
-                }
-                const cand = chunk.candidates?.[0];
-                if (!cand?.content?.parts) continue;
-                for (const part of cand.content.parts) {
-                    if (part.functionCall) {
-                        // --- 即時消費工具指令 ---
-                        console.log(`[Flow] 即時執行動作: ${part.functionCall.name}`);
-                        const { chainStatus: cs } = await registry.execute([{ name: part.functionCall.name, args: part.functionCall.args }], { onChunk, currentPrompt });
-                        if (cs.triggerNext) { chainStatus = cs; }
-                    } else if (part.text) {
-                        // --- 即時消費對話片段 (不多重串接) ---
-                        // 文字片段即刻存入 JSON 紀錄檔，不使用 fullOutput 收集
-                        await registry.execute([{ name: "finish_task", args: { summary: part.text } }], { onChunk, currentPrompt });
-                    }
-                }
+    for await (const chunk of result.stream) {
+        if (getIsAborted && getIsAborted()) {
+            console.log("[Flow] 生成過程中偵測到中斷。");
+            break;
+        }
+        const cand = chunk.candidates?.[0];
+        if (!cand?.content?.parts) continue;
+        for (const part of cand.content.parts) {
+            if (part.functionCall) {
+                // --- 不再直接修改任務樹，而是收集意圖後回傳 ---
+                derivedTasks.push({ name: part.functionCall.name, args: part.functionCall.args });
+            } else if (part.text) {
+                // --- 將對話任務解析為子 Task 意圖 ---
+                derivedTasks.push({ name: "finish_task", args: { summary: part.text } });
             }
+        }
+    }
+    
+    return { success: true, derivedTasks };
+});
 
-            if (chainStatus.triggerNext && loopCount < MAX_LOOPS) {
-                console.log(`[Flow] 自行連鎖觸發: ${chainStatus.nextPrompt}`);
-                await streamGeminiSDK(chainStatus.nextPrompt, onChunk, onComplete, getIsAborted, true);
-                return;
-            } else { break; }
-        }
+// 核心串流處理解析器 (完全透過動態衍生，消滅靜態迴圈)
+export async function streamGeminiSDK(userPrompt, onChunk, onComplete, getIsAborted) {
+    if (isProcessBusy) { onChunk({ chunk: '\n[系統提示]：伺服器忙碌中...\n' }); onComplete(); return; }
+    isProcessBusy = true;
+
+    try {
+        // 直接將最初的啟動請求作為 Root Task
+        const rootTask = registry.createTask("bootstrap_request", { user_prompt: userPrompt });
+
+        console.log(`[Flow] 🚀 啟動動態衍生任務圖 (根節點: bootstrap_request)...`);
+
+        // 直接執行這個根任務，它隨後會動態衍生出所有的子推論與子操作
+        await registry.executeTask(null, rootTask, { 
+            onChunk, 
+            getIsAborted, 
+            loopCount: 0 
+        });
+
     } finally {
-        if (!isRecursive) {
-            isProcessBusy = false;
-            onComplete();
-        }
+        isProcessBusy = false;
+        onComplete();
     }
 }
