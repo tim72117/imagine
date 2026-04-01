@@ -100,13 +100,7 @@ export default function App() {
   };
 
   useEffect(() => {
-    const initFramework = async () => {
-      try {
-        await fetch('http://localhost:3002/api/init-framework');
-        await fetchLatestCode();
-      } catch (err) { console.error('[Error] 初始化失敗:', err); }
-    };
-    initFramework();
+    fetchLatestCode();
   }, []);
 
   useEffect(() => {
@@ -153,6 +147,7 @@ export default function App() {
         if (data.type === 'rendering') { setIsLoadingCode(data.isLoading); return; }
         if (data.type === 'refresh') { fetchLatestCode(); return; }
         if (data.type === 'status') { setStatusMessage(data.message); return; }
+        if (data.statusMessage) { setStatusMessage(data.statusMessage); return; }
 
         if (data.isNew) {
           accumulatedContent = ''; 

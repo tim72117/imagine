@@ -92,8 +92,14 @@ describe('TaskManager 流程重現測試 (依據歷史 Log)', () => {
                     }
                 }
             ],
-            [   // 3. 讀完內容後的最終對話
-                { text: "分析完畢，這是一個純淨的 React 組件。" }
+            [   // 3. 讀完內容後的最終對話 (修正：模擬調用 send_message)
+                { 
+                    text: "分析完畢，這是一個純淨的 React 組件。",
+                    functionCall: { 
+                        name: "send_message", 
+                        args: { text: "分析完畢，這是一個純淨的 React 組件。" } 
+                    }
+                }
             ]
         ];
         callCount = 0;
@@ -105,37 +111,41 @@ describe('TaskManager 流程重現測試 (依據歷史 Log)', () => {
         });
 
         // --- 1. 斷言驗證：數據流 (Captured Prompts) ---
-        expect(capturedPrompts[1]).toContain("【工具執行完成回報】");
+        expect(capturedPrompts[1]).toContain("【實時工具執行回傳】");
         expect(capturedPrompts[1]).toContain("Target.tsx");
-        expect(capturedPrompts[2]).toContain("【工具執行完成回報】");
+        expect(capturedPrompts[2]).toContain("【實時工具執行回傳】");
         expect(capturedPrompts[2]).toContain("const App =");
 
         // --- 2. 斷言驗證：任務樹結構 (Task Hierarchy) ---
+        // 新架構下：bootstrap 為父，ai_request 與 tools 為其扁平子任務
         expect(rootTask.status).toBe('completed');
+        
         const aiSubTask1 = rootTask.tasks[0]; 
         expect(aiSubTask1.name).toBe('ai_request');
         
-        const toolTask1 = aiSubTask1.tasks[0]; // list_files
+        const toolTask1 = rootTask.tasks[1]; // list_files (由 bootstrap 主導)
         expect(toolTask1.name).toBe('list_files');
         
-        const aiSubTask2 = aiSubTask1.tasks[1]; // 次世代推論 (Chaining)
+        const aiSubTask2 = rootTask.tasks[2]; // 次世代推論 (由 bootstrap 輪詢)
         expect(aiSubTask2.name).toBe('ai_request');
-        
-        const toolTask2 = aiSubTask2.tasks[0]; // read_file_content
+
+        const toolTask2 = rootTask.tasks[3]; // read_file_content
         expect(toolTask2.name).toBe('read_file_content');
-        expect(toolTask2.result.content).toBeDefined();
-        
-        const aiSubTask3 = aiSubTask2.tasks[1]; // 最終推論
+
+        const aiSubTask3 = rootTask.tasks[4]; // 最後一輪思考
         expect(aiSubTask3.name).toBe('ai_request');
-        expect(aiSubTask3.tasks[0].name).toBe('send_message');
+        
+        // 最終產出的 send_message 是由 bootstrap 執行的動作之一
+        const lastTool = rootTask.tasks[rootTask.tasks.length - 1];
+        expect(lastTool.name).toBe('send_message');
 
         // --- 3. 斷言驗證：最終訊息 ---
         const messages = [];
-        const collectMessages = (t) => {
-            if (t.name === 'send_message' && t.result) messages.push(t.result.text);
-            t.tasks.forEach(collectMessages);
-        };
-        collectMessages(rootTask);
+        rootTask.tasks.forEach(t => {
+            if (t.name === 'send_message' && t.args?.text) {
+                messages.push(t.args.text);
+            }
+        });
         expect(messages.join('')).toContain("分析完畢");
 
         console.log(`[Test] 自動連鎖工作流綜合測試 (數據流 + 結構) 完美通過！`);

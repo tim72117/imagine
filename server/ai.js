@@ -46,8 +46,8 @@ const tools = [{
             }
         },
         {
-            name: "update_ui",
-            description: "修改現有代碼或產出全新的組件。遵循極簡沙盒規範。",
+            name: "update_file",
+            description: "修改檔案內容或產出全新的組件代碼。遵循極簡沙盒規範。",
             parameters: {
                 type: "OBJECT",
                 properties: {
@@ -55,15 +55,15 @@ const tools = [{
                         type: "STRING",
                         description: "完整的 React 組件代碼。規範：\n1. 絕對禁止 import。\n2. 僅限一個名為 App 的組件。\n3. 無須 export。\n4. 僅限 React 18 語法與 Tailwind CSS。\n5. 不支援第三方圖示，請用 Emoji 或 Tailwind 組件圖形。"
                     },
-                    explanation: { type: "STRING", description: "【極簡】說明本次 UI 變更的核心邏輯與設計重點。" },
-                    next_step: { type: "STRING", description: "UI 產出/修復後，預計的後續開發動作。" }
+                    explanation: { type: "STRING", description: "【極簡】說明本次代碼變更的核心邏輯與修改點。" },
+                    next_step: { type: "STRING", description: "檔案更新完成後，預計的後續開發動作。" }
                 },
                 required: ["code", "explanation", "next_step"]
             }
         },
         {
             name: "plan",
-            description: "當接收到的需求過於龐大、複雜、涉及多階段變動，或是需求本身描述過於空泛、抽象、不明確時呼叫。進行全局架構分析、需求澄清、步驟拆解並更新開發手冊以明確後續計畫。",
+            description: "當接收到的需求過於龐大，可能需要拆解進行多步驟處理時呼叫。進行架構分析與開發步驟的拆解。",
             parameters: {
                 type: "OBJECT",
                 properties: {
@@ -75,6 +75,17 @@ const tools = [{
                     }
                 },
                 required: ["analysis", "next_steps_plan"]
+            }
+        },
+        {
+            name: "ask_user",
+            description: "當目前的資訊不足、需求不全或存在多種實作路徑需要使用者決策時呼叫。發送特定的問題給使用者並暫停目前的自動化開發流程。",
+            parameters: {
+                type: "OBJECT",
+                properties: {
+                    question: { type: "STRING", description: "要詢問使用者的具體問題。說明清楚為何需要停下問這個問題。" }
+                },
+                required: ["question"]
             }
         }
     ]
@@ -99,7 +110,11 @@ export async function recordGeminiResponse({ type = "CHAT", prompt, output, data
         const now = new Date();
         const dateStr = now.toISOString().split('T')[0];
         const hourStr = now.getHours().toString().padStart(2, '0');
-        const fileName = `log_${dateStr}_${hourStr}.json`;
+
+        let fileName = `log_${dateStr}_${hourStr}.json`;
+        if (data?.session_id) {
+            fileName = `log_${data.session_id}.json`;
+        }
         const historyPath = path.join(HISTORY_DIR, fileName);
 
         let logs = [];
@@ -132,7 +147,7 @@ class Task {
         this.result = null;
         this.createdAt = new Date().toISOString();
         this.parent = null; // 父節點物件引用 (向後探訪)
-        
+
         // 自動註冊至全域任務樹
         taskTreeMap.set(this.id, this);
     }
@@ -155,10 +170,11 @@ class TaskManager {
         this.priorities = {
             "bootstrap_request": 1,
             "ai_request": 2,          // 最高優先，發出推論請求並展開新任務
-            "list_sandbox_files": 4,
+            "list_files": 4,
             "read_file_content": 5,
             "plan": 20,
-            "update_ui": 30,
+            "update_file": 30,
+            "ask_user": 99,
             "send_message": 99
         };
     }
@@ -196,7 +212,7 @@ class TaskManager {
     async executeTask(parentTask, task, context = {}) {
         // 確保 session 存在於 context 中，供所有 Task 共用狀態 (如 isAlreadySpoken)
         if (!context.session) context.session = {};
-        
+
         const handler = this.handlers.get(task.name);
 
         if (!handler) {
@@ -216,12 +232,13 @@ class TaskManager {
         await recordGeminiResponse({
             type: "TASK_START",
             prompt: `【Task 啟動】：${task.name}`,
-            output: task.args, 
+            output: task.args,
             data: {
                 id: task.id,
                 parentId: parentTask?.id,
                 name: task.name,
-                args: task.args
+                args: task.args,
+                session_id: context.sessionId
             }
         });
 
@@ -239,7 +256,8 @@ class TaskManager {
                 id: task.id,
                 parentId: parentTask?.id,
                 name: task.name,
-                result: result
+                result: result,
+                session_id: context.sessionId
             }
         });
 
@@ -251,57 +269,78 @@ class TaskManager {
     }
 
     // 新增方法：深度優先探訪並執行 (支援動態擴展)
-    async traverseAndExecute(task, context = {}) {
-        const parentTask = context.currentParent || null;
-        
-        // 0. 深度限制與 Session 初始化
+    async traverseAndExecute(rootTask, context = {}) {
+        let current = rootTask;
         context.session = context.session || {};
-        context.depth = (context.depth || 0) + 1;
-        
-        if (context.depth > 25) {
-            console.error(`  [Walker] ⚠️ 達到最大遞迴深度 (depth: ${context.depth})，終止執行。`);
-            task.status = 'error';
-            task.result = { error: "Max depth exceeded" };
-            return task.result;
-        }
+        context.visitCount = 0; // 追蹤已執行的任務總數
 
-        // 1. 執行目前節點 (使用既有的核心執行邏輯)
-        const result = await this.executeTask(parentTask, task, context);
+        console.log(`  [Walker] 🚶 啟動指標走訪器 (Root: ${rootTask.id})`);
 
-        // 2. 檢查執行完後是否產生了新的分岔 (子任務)
-        // 注意：使用 for (let i = 0; ...) 是為了支援在執行過程中動態 addTask
-        if (task.tasks && task.tasks.length > 0) {
-            console.log(`  [Walker] 🌳 節點 ${task.id} 執行完畢，發現 ${task.tasks.length} 個分岔，準備深入探訪...`);
+        while (current) {
+            // 0. 如果已執行超過 10 個任務，基於預算限制主動停止
+            if (context.visitCount >= 10) {
+                console.warn(`  [Walker] ⚠️ 達到最大造訪任務數限制 (10)，終止走訪流程。`);
+                break;
+            }
 
-            const subResults = []; 
-            for (let i = 0; i < task.tasks.length; i++) {
-                const subTask = task.tasks[i];
-                
-                // 3. 遞迴探訪各個分岔
-                const subRes = await this.traverseAndExecute(subTask, { ...context, currentParent: task });
-                subResults.push({ id: subTask.id, name: subTask.name, result: subRes });
+            // 1. 執行目前節點 (如果尚未執行)
+            if (current.status === 'pending' || current.status === 'active') {
+                context.visitCount++; // 累計執行次數
+                const result = await this.executeTask(current.parent, current, context);
 
-                // --- 核心進化：自動偵測連鎖反饋 (Next Step Chaining) ---
-                // 如果目前的子任務參數中帶有 next_step，代表需要基於結果進行下一步思考
-                // 我們在此動態「長出」一個新的 ai_request 任務
-                if (subTask.args && subTask.args.next_step) {
-                    console.log(`  [Walker] 🔗 偵測到 ${subTask.name} 帶有 next_step，動態掛載推論反饋...`);
-                    
-                    const feedbackPrompt = `【工具執行完成回報】\n原始計畫：${subTask.args.next_step}\n實際產出數據：\n${JSON.stringify(subRes, null, 2)}\n\n請根據以上真實情況，繼續進行開發或判斷下一步。`;
-                    
-                    // 動態增加一個子任務，迴圈下次會自動跑它
-                    task.addTask("ai_request", { prompt: feedbackPrompt });
+                // --- 核心進化：動態偵測連鎖反饋 (Next Step Chaining) ---
+                if (current.parent && current.args?.next_step) {
+                    console.log(`  [Walker] 🔗 偵測到 ${current.name} 帶有 next_step，動態掛載回饋...`);
+                    const feedbackPrompt = `【工具執行完成回報】\n原始計畫：${current.args.next_step}\n實際產出數據：\n${JSON.stringify(result, null, 2)}\n\n請根據以上真實情況，繼續進行開發或判斷下一步。`;
+                    current.parent.addTask("ai_request", { prompt: feedbackPrompt });
                 }
             }
 
-            // 4. 將子節點的彙總結果帶回目前的 result 物件中
-            if (task.result && typeof task.result === 'object') {
-                task.result.subResults = subResults;
+            // 2. 判斷下一個移動指標 (DFS 順序)
+
+            // A. 向下探訪 (Down)
+            const unvisitedChild = current.tasks.find(t => t.status === 'pending' || t.status === 'active');
+            if (unvisitedChild) {
+                current = unvisitedChild;
+                continue;
+            }
+
+            // B. 子節點跑完，嘗試移動至下一個兄弟節點 (Right) 或 回溯 (Up)
+            if (current === rootTask) break; // 根部完成
+
+            let foundNext = false;
+            let tracer = current;
+
+            while (tracer && tracer !== rootTask) {
+                // 彙總結果至父節點 (模擬遞迴回傳)
+                if (tracer.parent && (tracer.status === 'completed' || tracer.status === 'error')) {
+                    tracer.parent.result = tracer.parent.result || {};
+                    tracer.parent.result.subResults = tracer.parent.result.subResults || [];
+                    if (!tracer.parent.result.subResults.find(r => r.id === tracer.id)) {
+                        tracer.parent.result.subResults.push({ id: tracer.id, name: tracer.name, result: tracer.result });
+                    }
+                }
+
+                const siblings = tracer.parent.tasks;
+                const myIndex = siblings.indexOf(tracer);
+
+                if (myIndex < siblings.length - 1) {
+                    current = siblings[myIndex + 1];
+                    foundNext = true;
+                    break;
+                }
+
+                // 無兄弟則繼續向上
+                tracer = tracer.parent;
+            }
+
+            if (!foundNext) {
+                current = null;
             }
         }
 
-        // 5. 返回結果
-        return task.result;
+        console.log(`  [Walker] 🏁 指標走訪結束。`);
+        return rootTask.result;
     }
 }
 
@@ -314,11 +353,17 @@ registry.register("list_files", async (args, context) => {
         const absPath = path.isAbsolute(args.path) ? args.path : path.join(base, args.path);
         const files = await fs.readdir(absPath);
 
+        // 將檔案轉換為相對於工作目錄的相對路徑
+        const relativeFiles = files.map(file => {
+            const fullPath = path.join(absPath, file);
+            return path.relative(base, fullPath);
+        });
+
         return {
             success: true,
             path: args.path,
-            files: files, // 回傳原始陣列，方便程式處理
-            fileList: files.join(', ') // 回傳字串，方便 AI 閱讀
+            files: relativeFiles, // 回傳相對路徑陣列
+            fileList: relativeFiles.join(', ') // 回傳相對路徑字串
         };
     } catch (err) {
         return {
@@ -359,30 +404,29 @@ registry.register("plan", async (args, context) => {
         parent.addTask("ai_request", { prompt: step });
     }
 
-    return { 
-        success: true, 
-        message: `已建立 ${args.next_steps_plan.length} 個計畫步驟並掛載。` 
+    return {
+        success: true,
+        message: `已建立 ${args.next_steps_plan.length} 個計畫步驟並掛載。`
     };
 });
 
-// 註冊：更新 UI
-// 註冊：更新 UI 代碼 (實體寫入版)
-registry.register("update_ui", async (args, context) => {
+// 註冊：更新檔案內容 (實體寫入版)
+registry.register("update_file", async (args, context) => {
     try {
         const base = context.workDir || path.join(__dirname, '../src/sandbox');
         const targetPath = path.join(base, 'Target.tsx');
-        
-        await fs.writeFile(targetPath, args.code);
-        console.log(`  [UI] 📁 已更新 UI 代碼至: ${targetPath}`);
 
-        return { 
-            success: true, 
+        await fs.writeFile(targetPath, args.code);
+        console.log(`  [File] 📁 已更新檔案內容至: ${targetPath}`);
+
+        return {
+            success: true,
             path: targetPath,
-            explanation: args.explanation, 
-            next_step: args.next_step 
+            explanation: args.explanation,
+            next_step: args.next_step
         };
     } catch (err) {
-        console.error(`  [UI] ❌ 更新失敗:`, err);
+        console.error(`  [File] ❌ 更新失敗:`, err);
         return { success: false, error: err.message };
     }
 });
@@ -395,13 +439,56 @@ registry.register("send_message", async (args) => {
     return { success: true, text: args.text };
 });
 
-// 註冊：初始入口 (直接掛載版)
+// 註冊：詢問使用者工具 (暫停 chain)
+registry.register("ask_user", async (args) => {
+    return { success: true, question: args.question };
+});
+
+// 註冊：初始入口 (自動化思維迴圈與執行主控)
 registry.register("bootstrap_request", async (args, context) => {
-    // 1. 直發推論任務至當前節點下 (長出第一個子分岔)
-    context.currentTask.addTask("ai_request", { prompt: args.user_prompt });
-    
-    console.log(`  [Bootstrap] 🚀 系統根任務啟動，已掛載首個推論分支。`);
-    
+    const finalGoal = args.user_prompt;
+    let currentInput = `【最終目標】：${finalGoal}\n\n請根據目標開始第一輪思考與偵查。`;
+    const MAX_ROUNDS = context.loopCountLimit || 5;
+
+    console.log(`  [Bootstrap] 🚀 啟動執行主控迴圈 (上限 ${MAX_ROUNDS} 輪)`);
+
+    for (let i = 0; i < MAX_ROUNDS; i++) {
+        console.log(`  [Bootstrap] 🔄 進入第 ${i + 1} 輪推論與執行`);
+
+        // 1. 向 AI 請求推論
+        const aiTask = context.currentTask.addTask("ai_request", { prompt: currentInput });
+        const inference = await registry.executeTask(context.currentTask, aiTask, context);
+
+        // 2. 在內部解析並執行 AI 要求的動作 (Function Calls)
+        let actionResults = [];
+        if (inference.actions && inference.actions.length > 0) {
+            console.log(`  [Bootstrap] 🛠️ 偵測到 ${inference.actions.length} 個動作，開始序列執行...`);
+            for (const action of inference.actions) {
+                const subTask = context.currentTask.addTask(action.name, action.args);
+                const res = await registry.executeTask(context.currentTask, subTask, context);
+                actionResults.push({ tool: action.name, result: res, next_step: action.args?.next_step });
+            }
+        }
+
+        // 3. 判斷主動終止
+        const hasTerminator = inference.actions?.some(a => a.name === 'send_message' || a.name === 'ask_user');
+        if (hasTerminator) {
+            console.log(`  [Bootstrap] 🛑 AI 已發出終端指標，結束主控迴圈。`);
+            break;
+        }
+
+        // 4. 彙整結果至下一輪 (包含思考與結構化的工具回饋)
+        let feedback = `【上一步推論分析】：\n${inference.text || "(無分析背景)"}\n\n`;
+        if (actionResults.length > 0) {
+            feedback += `【實時工具執行回傳】：\n`;
+            actionResults.forEach(ar => {
+                feedback += `🛠️ 調用工具：[${ar.tool}]\n結果數據：\n${JSON.stringify(ar.result, null, 2)}\n\n`;
+            });
+        }
+
+        currentInput = `【最終目標】：${finalGoal}\n\n${feedback}請根據以上推論分析與工具執行結果，判斷是否需要繼續執行後續步驟、或直接回報完成。`;
+    }
+
     return { success: true };
 });
 
@@ -423,9 +510,9 @@ registry.register("ai_request", async (args, context) => {
 2. **透明度**: 所有說明與分析流程請一律使用【繁體中文】。
 
 【執行流程 (SOP)】：
-1. **探索與釐清階段 (Discovery & Clarify)**: 調用偵查工具與 \`list_sandbox_files\` 獲取現況。
+1. **探索與釐理階段 (Discovery & Clarify)**: 調用偵查工具與 \`list_files\` 獲取現況。
 2. **決議與規劃階段 (Reasoning & Plan)**: 使用 \`plan\` 工具梳理多階段開發步驟。
-3. **執行階段 (Implementation)**: 套用代碼變動。
+3. **執行階段 (Implementation)**: 呼叫 \`update_file\` 套用代碼變動。
 4. **回報階段 (Reporting)**: 完成所有變動後，【必須】呼叫 \`send_message\` 提供彙報並結束連鎖。
 
 ${getToolDescriptionPrompt()}
@@ -434,35 +521,32 @@ ${getToolDescriptionPrompt()}
     const result = await model.generateContentStream({
         contents: [{ role: "user", parts: [{ text: `${systemInstruction}\nUser Request: ${currentPrompt}` }] }]
     });
+    // 3. 收集結果並回傳建議 Action，不主動掛載子任務
+    const actions = [];
+    let textResult = "";
 
     for await (const chunk of result.stream) {
         if (getIsAborted && getIsAborted()) {
             console.log("[Flow] 生成過程中偵測到中斷。");
             break;
         }
+
         const cand = chunk.candidates?.[0];
         if (!cand?.content?.parts) continue;
-        for (const part of cand.content.parts) {
-            if (part.functionCall) {
-                const name = part.functionCall.name;
-                const toolArgs = part.functionCall.args;
-                
-                // --- 深度限制保護 (避免 AI 陷入無窮推論循環) ---
-                context.loopCount = (context.loopCount || 0) + 1;
-                if (context.loopCount > 10) {
-                    console.log(`  [AI] ⚠️ 連鎖推論深度達限，終止衍生。`);
-                    continue;
-                }
 
-                // --- 建立分支任務 ---
-                context.currentTask.addTask(name, toolArgs);
-                console.log(`  [AI] 🧠 偵測到行動計畫: ${name}，已掛載至任務樹。`);
-            } else if (part.text) {
-                context.currentTask.addTask("send_message", { text: part.text });
+        for (const part of cand.content.parts) {
+            if (part.text) {
+                textResult += part.text;
+            }
+            if (part.functionCall) {
+                actions.push({
+                    name: part.functionCall.name,
+                    args: part.functionCall.args
+                });
             }
         }
     }
 
-    return { success: true };
+    return { text: textResult, actions };
 });
 

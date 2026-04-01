@@ -1,14 +1,19 @@
 import express from 'express';
 import cors from 'cors';
+import path from 'path';
 import dotenv from 'dotenv';
 import fs from 'fs-extra';
 import { WebSocketServer } from 'ws';
+import { fileURLToPath } from 'url';
 import {
   registry,
   TARGET_FILE
 } from './ai.js';
 
 dotenv.config();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 
@@ -25,27 +30,24 @@ const broadcast = (data) => {
 // --- 註冊 工具鉤子 (Hooks) ---
 // 註解：現在我們直接使用 broadcast，不再依賴 context.onChunk
 
-registry.on('update_ui', 'before', async ({ args }) => {
+registry.on('update_file', 'before', async ({ args }) => {
   if (args.code) {
     broadcast({ type: 'rendering', isLoading: true });
-    
-    console.log(`[Test] 偵測到 UI 變更，進入 3 秒測試延遲...`);
+
+    console.log(`[Test] 偵測到代碼變更，進入 3 秒測試延遲...`);
     await new Promise(resolve => setTimeout(resolve, 3000));
 
-    console.log(`[Hook:before] 正在寫入 UI 代碼至 ${TARGET_FILE}...`);
+    console.log(`[Hook:before] 正在寫入檔案代碼至 ${TARGET_FILE}...`);
     await fs.writeFile(TARGET_FILE, args.code, 'utf8');
   }
 });
 
-
 registry.on('list_files', 'after', async ({ args, result }) => {
-  broadcast({ isNew: true });
-  broadcast({ chunk: `✅ **目錄掃描完成**\n[目錄]：\`${args.path}\`\n\`\`\`\n${result.fileList}\n\`\`\`\n⏭️ **計畫：** ${args.next_step}` });
+  broadcast({ statusMessage: `✅ 目錄掃描完成: ${args.path}` });
 });
 
 registry.on('read_file_content', 'after', async ({ args }) => {
-  broadcast({ isNew: true });
-  broadcast({ chunk: `✅ **分析成功：** \`${args.path}\`\n⏭️ **目的：** ${args.explanation}` });
+  broadcast({ statusMessage: `✅ 分析檔案成功: ${args.path}` });
 });
 
 registry.on('plan', 'after', async ({ args }) => {
@@ -53,11 +55,10 @@ registry.on('plan', 'after', async ({ args }) => {
   broadcast({ chunk: `🎯 **任務規劃已更新**\n⏭️ **執行計畫：** ${args.next_steps_plan}` });
 });
 
-registry.on('update_ui', 'after', async ({ args }) => {
+registry.on('update_file', 'after', async ({ args }) => {
   broadcast({ type: 'rendering', isLoading: false });
   broadcast({ type: 'refresh' }); // 觸發前端刷新 Sandbox
-  broadcast({ isNew: true });
-  broadcast({ chunk: `✨ **UI 實作完成：** ${args.explanation}\n⏭️ **計畫：** ${args.next_step}` });
+  broadcast({ statusMessage: `✨ 代碼實作完成: ${args.explanation}` });
 });
 
 
@@ -70,6 +71,11 @@ registry.on('send_message', 'after', async ({ args, context }) => {
     context.session.isAlreadySpoken = true;
   }
   broadcast({ chunk: args.text }); // 接續傳送內容
+});
+
+registry.on('ask_user', 'after', async ({ args }) => {
+  broadcast({ isNew: true });
+  broadcast({ chunk: `❓ **AI 正在詢問：**\n\n${args.question}` });
 });
 
 app.use(cors({ origin: '*' }));
@@ -98,7 +104,7 @@ wss.on('connection', (ws) => {
   ws.on('message', async (message) => {
     try {
       const { prompt } = JSON.parse(message.toString());
-      
+
       ws.send(JSON.stringify({ isNew: true, chunk: `【WS 即時接收確認】：${prompt}` }));
 
       if (isProcessBusy) {
@@ -112,9 +118,10 @@ wss.on('connection', (ws) => {
         console.log(`[Flow] 🚀 啟動任務樹走訪 (根節點: bootstrap_request)...`);
 
         // 使用 traverseAndExecute 取代原本的 executeTask，達成「深度優先探訪與執行」
-        await registry.traverseAndExecute(rootTask, { 
-          getIsAborted: () => isAborted, 
+        await registry.traverseAndExecute(rootTask, {
+          getIsAborted: () => isAborted,
           loopCount: 0,
+          sessionId: rootTask.id, // 使用根任務 ID 作為對話 Session ID
           workDir: path.join(__dirname, '../src/sandbox') // 強制沙盒區域
         });
       } finally {
