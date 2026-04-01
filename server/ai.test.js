@@ -1,8 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import { registry } from './ai';
 
-// --- 模擬資料序列 (依據 log_2026-03-31_02.json) ---
-const mockResponses = [
+// --- 模擬資料序列 ---
+let mockResponses = [
     // 1. 第一次 ai_request: 輸出 plan
     [
         {
@@ -38,11 +38,17 @@ const mockResponses = [
 
 let callCount = 0;
 
+let capturedPrompts = []; // 用於收集 AI 接收到的 Prompts
+
 vi.mock('@google/generative-ai', () => {
     const MockGoogleGenerativeAI = vi.fn(function() {
         return {
             getGenerativeModel: vi.fn().mockReturnValue({
-                generateContentStream: vi.fn().mockImplementation(async () => {
+                generateContentStream: vi.fn().mockImplementation(async (args) => {
+                    // 收集傳入的 Prompt 內容
+                    const p = args.contents[0].parts[0].text;
+                    capturedPrompts.push(p);
+
                     const parts = mockResponses[callCount] || [];
                     callCount++;
                     return {
@@ -115,5 +121,51 @@ describe('TaskManager 流程重現測試 (依據歷史 Log)', () => {
         expect(isNewCallCount).toBe(1);
         
         console.log(`[Test] 成功重現放射狀對話鏈，共執行 ${allAiRequests.length} 次推論，總計發送 isNew: true ${isNewCallCount} 次。`);
+    });
+
+    it('應該能處理三連鎖工作流：list_files -> read_file_content -> send_message', async () => {
+        // 模擬三階段推論
+        mockResponses = [
+            [   // 1. AI 決定先看目錄
+                {
+                    functionCall: {
+                        name: "list_files",
+                        args: { path: "src/", explanation: "尋找主入口檔案", next_step: "我需要讀取 App.tsx 以進行分析" }
+                    }
+                }
+            ],
+            [   // 2. AI 看到路徑後，決定讀取 App.tsx 的內容
+                {
+                    functionCall: {
+                        name: "read_file_content",
+                        args: { path: "src/App.tsx", explanation: "分析組件結構", next_step: "準備給予用戶總結" }
+                    }
+                }
+            ],
+            [   // 3. 讀完內容後的最終對話
+                { text: "我已經分析完 App.tsx 了，這是一個標準的 React 入口組件。" }
+            ]
+        ];
+        callCount = 0;
+        capturedPrompts = [];
+
+        const rootTask = registry.createTask("bootstrap_request", { user_prompt: "分析我的沙盒代碼" });
+        await registry.executeTask(null, rootTask);
+        
+        // --- 深度驗證數據流 ---
+        
+        // 1. 檢查第一次推論後的反饋 (應包含 list_files 的執行結果)
+        expect(capturedPrompts[1]).toContain("【工具執行完成回報】");
+        expect(capturedPrompts[1]).toContain("App.tsx"); // list_files 抓到的真實數據
+        
+        // 2. 檢查第二次推論後的反饋 (應包含 read_file_content 讀取到的 App.tsx 真實內容)
+        expect(capturedPrompts[2]).toContain("【工具執行完成回報】");
+        expect(capturedPrompts[2]).toContain("export default function App"); // 修正為符合實體檔案的語法
+        
+        // 3. 驗證最終結果
+        const aiReqTask = rootTask.tasks[0];
+        expect(aiReqTask.result.text).toContain("React 入口組件");
+        
+        console.log(`[Test] 三連鎖「發現->讀取->分析」測試完美通過！`);
     });
 });

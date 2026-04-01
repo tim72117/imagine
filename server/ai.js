@@ -220,7 +220,8 @@ class TaskManager {
         await this.runHooks(task.name, 'before', { toolName: task.name, args: task.args, context, parentTask, task });
 
         // 2. 執行核心工具邏輯 (Handler)
-        result = await handler(task.args, context);
+        // 將當前 task 本身注入 context，供 ai_request 等需要遞迴建立子任務的工具使用
+        result = await handler(task.args, { ...context, currentTask: task });
         task.result = result;
 
         await recordGeminiResponse(
@@ -276,7 +277,7 @@ registry.register("list_files", async (args) => {
     try {
         const absPath = path.isAbsolute(args.path) ? args.path : path.join(__dirname, '../', args.path);
         const files = await fs.readdir(absPath);
-        
+
         // 分類檔案與目錄 (可選，但讓 AI 好判斷)
         const fileList = files.join(', ');
 
@@ -324,7 +325,7 @@ registry.register("update_framework", async (args, { currentPrompt }) => {
 // 註冊：任務拆解與規劃 (內部執行器版)
 registry.register("plan", async (args, context) => {
     const { currentPrompt } = context;
-    
+
     // 1. 建立一個局部的、獨立的任務執行器
     const subRegistry = new TaskManager();
     // 繼承全域的工具處理器與優先級設定
@@ -342,7 +343,7 @@ registry.register("plan", async (args, context) => {
         };
 
         const subTask = subRegistry.createTask("ai_request", subTaskArgs);
-        
+
         // 修改點：現在可以直接接收 executeTask 回傳的結果
         const taskResult = await subRegistry.executeTask(null, subTask, context);
 
@@ -368,26 +369,33 @@ registry.register("update_ui", async (args) => {
 // 註冊：通用子任務執行器 (Batch Executor)
 registry.register("run_subtasks", async (args, context) => {
     const { tasks } = args; // tasks 格式範例: [{ name: "ai_request", args: { ... } }]
-    
+
     if (!tasks || !Array.isArray(tasks)) {
         return { success: false, error: "無效的子任務清單格式" };
     }
 
-    const subRegistry = new TaskManager();
-    subRegistry.handlers = registry.handlers;
-    subRegistry.priorities = registry.priorities;
-
-    let lastResult = null;
+    let lastResult = { success: true, note: "無子任務執行" };
+    const parent = context.currentTask;
 
     console.log(`  [Batch Runner] ⚡ 啟動批次任務執行 (共 ${tasks.length} 步)`);
 
     for (const item of tasks) {
-        // 建立並執行子任務
-        const subTask = subRegistry.createTask(item.name, item.args);
-        lastResult = await subRegistry.executeTask(null, subTask, context);
+        // 1. 建立並執行子任務 (掛載在 run_subtasks 節點下)
+        const subTask = registry.createTask(item.name, item.args);
+        lastResult = await registry.executeTask(parent, subTask, context);
+        
+        // 2. 如果任務參數中有 next_step，則基於「真實執行結果」立刻進行下一步推論
+        if (item.args && item.args.next_step) {
+            console.log(`  [Batch Runner] 🔗 偵測到 next_step，為工具 ${item.name} 啟動連線推論...`);
+            const followUpArgs = {
+                prompt: `【工具執行完成回報】\n原始行動計畫：${item.args.next_step}\n實際執行產出數據：\n${JSON.stringify(lastResult, null, 2)}\n\n請根據以上真實情況，繼續進行開發或判斷下一步。`
+            };
+            const followUpTask = registry.createTask("ai_request", followUpArgs);
+            lastResult = await registry.executeTask(parent, followUpTask, context);
+        }
     }
 
-    return lastResult; // 回傳清單中最後一個任務的產出結果
+    return lastResult; // 回傳清單中最後一筆（含連鎖推論）的產出結果
 });
 
 // 註冊：對話發送工具 (切斷 chain)
@@ -458,15 +466,11 @@ ${frameworkDocs}
         }
     }
 
-    // --- 修改亮點：將收集到的任務，立刻交給 run_subtasks 執行器進行同步處理 ---
-    const subRegistry = new TaskManager();
-    subRegistry.handlers = registry.handlers;
-    subRegistry.priorities = registry.priorities;
+    // --- 修改亮點：不再使用臨時執行器，直接使用主任務樹的分發機制 ---
+    const dispatchTask = registry.createTask("run_subtasks", { tasks: derivedTasks });
 
-    const dispatchTask = subRegistry.createTask("run_subtasks", { tasks: derivedTasks });
-    
-    // 執行同步子任務並回傳最終工具結果
-    const finalResult = await subRegistry.executeTask(null, dispatchTask, context);
+    // 執行同步子任務並回傳結果。傳入 context.currentTask 作為父節點。
+    const finalResult = await registry.executeTask(context.currentTask, dispatchTask, context);
 
     return finalResult;
 });
