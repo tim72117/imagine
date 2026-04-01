@@ -18,15 +18,16 @@ export const HISTORY_DIR = path.join(__dirname, 'history');
 const tools = [{
     functionDeclarations: [
         {
-            name: "list_sandbox_files",
-            description: "列出 src/sandbox/ 目錄下的所有檔案與資料夾。需說明讀取原因與接下來的計畫。",
+            name: "list_files",
+            description: "獲取專案目錄清單（資料夾與檔案）。需指定路徑、說明原因與下一步計畫。",
             parameters: {
                 type: "OBJECT",
                 properties: {
-                    explanation: { type: "STRING", description: "【極簡】說明為何此時需要獲取目錄清單。" },
+                    path: { type: "STRING", description: "要讀取的目錄路徑（例如: src/sandbox/ 或 server/）" },
+                    explanation: { type: "STRING", description: "說明為何此時需要獲取此清單。" },
                     next_step: { type: "STRING", description: "獲取清單後預計執行的下一步分析動作。" }
                 },
-                required: ["explanation", "next_step"]
+                required: ["path", "explanation", "next_step"]
             }
         },
         {
@@ -205,47 +206,47 @@ class TaskManager {
     async executeTask(parentTask, task, context = {}) {
         const handler = this.handlers.get(task.name);
 
-        // 1. 若該任務有對應的 handler (基本工具)，則準備執行
-        if (handler) {
-            task.status = 'running';
-            console.log(`  [Task] 派發任務: ${task.name} (Task ID: ${task.id})`);
-
-            await this.runHooks(task.name, 'before', { toolName: task.name, args: task.args, context, parentTask, task });
-
-            const result = await handler(task.args, context);
-            task.result = result;
-            task.status = 'completed';
-
-            await recordGeminiResponse(
-                `【Task 執行】：${task.name}`,
-                JSON.stringify({ parentTaskId: parentTask?.id, taskId: task.id, args: task.args, result }, null, 2),
-                "TASK_RESULT",
-                { parentTaskId: parentTask?.id, taskId: task.id, tool: task.name, args: task.args }
-            );
-
-            await this.runHooks(task.name, 'after', { toolName: task.name, args: task.args, result, context, parentTask, task });
-
-            // --- 統一任務衍生機制 ---
-            if (result.derivedTasks && Array.isArray(result.derivedTasks)) {
-                for (const d of result.derivedTasks) {
-                    // 如果是 ai_request，則檢查循環次數以防止死鎖
-                    if (d.name === "ai_request") {
-                        context.loopCount = (context.loopCount || 0) + 1;
-                        if (context.loopCount > 5) {
-                            console.log(`  [Task] ⚠️ 已達連鎖推論深度上限 (MAX=5)，跳過 ai_request。`);
-                            continue;
-                        }
-                    }
-                    task.addTask(d.name, d.args);
-                }
-                console.log(`  [Task] 🧬 衍生出 ${result.derivedTasks.length} 個子任務並掛載。`);
-            }
-        } else {
-            // 如果沒有 handler，它只是一個複合群組任務 (Composite Task)
-            task.status = 'running';
+        if (!handler) {
+            console.error(`  [Task] ❌ 找不到任務處理器: ${task.name} (Task ID: ${task.id})`);
+            task.status = 'error';
+            return;
         }
 
-        // 2. 動態追蹤並消化它底下的所有遞迴子任務
+        let result = null;
+        task.status = 'running';
+        console.log(`  [Task] 派發任務: ${task.name} (Task ID: ${task.id})`);
+
+        // 1. 執行 Before Hook
+        await this.runHooks(task.name, 'before', { toolName: task.name, args: task.args, context, parentTask, task });
+
+        // 2. 執行核心工具邏輯 (Handler)
+        result = await handler(task.args, context);
+        task.result = result;
+
+        await recordGeminiResponse(
+            `【Task 執行】：${task.name}`,
+            JSON.stringify({ parentTaskId: parentTask?.id, taskId: task.id, args: task.args, result }, null, 2),
+            "TASK_RESULT",
+            { parentTaskId: parentTask?.id, taskId: task.id, tool: task.name, args: task.args }
+        );
+
+        // 3. 統一任務衍生機制 (子任務掛載)
+        if (result.derivedTasks && Array.isArray(result.derivedTasks)) {
+            for (const d of result.derivedTasks) {
+                // 如果是 ai_request，則檢查循環次數以防止死鎖
+                if (d.name === "ai_request") {
+                    context.loopCount = (context.loopCount || 0) + 1;
+                    if (context.loopCount > 5) {
+                        console.log(`  [Task] ⚠️ 已達連鎖推論深度上限 (MAX=5)，跳過 ai_request。`);
+                        continue;
+                    }
+                }
+                task.addTask(d.name, d.args);
+            }
+            console.log(`  [Task] 🧬 衍生出 ${result.derivedTasks.length} 個子任務並掛載。`);
+        }
+
+        // 4. 動態追蹤並消化它底下的所有遞迴子任務
         while (true) {
             const pendingTasks = task.tasks.filter(t => t.status === 'pending');
             if (pendingTasks.length === 0) break;
@@ -260,57 +261,52 @@ class TaskManager {
             await this.executeTask(task, currentSubTask, context);
         }
 
-        if (!handler) task.status = 'completed';
+        // 5. 只有當所有子任務都完成後，才執行 After Hook 並將標記主任務完成
+        await this.runHooks(task.name, 'after', { toolName: task.name, args: task.args, result, context, parentTask, task });
+        task.status = 'completed';
+
+        return result; // 修改點：讓任務執行器會回傳最後的執行結果
     }
 }
 
 export const registry = new TaskManager();
 
-// 註冊：清單讀取
-registry.register("list_sandbox_files", async (args, { currentPrompt }) => {
+// 註冊：目錄清單讀取 (通用版)
+registry.register("list_files", async (args) => {
     try {
-        const sandboxDir = path.join(__dirname, '../src/sandbox/');
-        const files = await fs.readdir(sandboxDir);
-
-        // 將檔案清單轉為完整相對路徑
-        const fullPaths = files.map(file => path.join('src/sandbox', file).replace(/\\/g, '/'));
-        const fileList = fullPaths.join(', ');
+        const absPath = path.isAbsolute(args.path) ? args.path : path.join(__dirname, '../', args.path);
+        const files = await fs.readdir(absPath);
+        
+        // 分類檔案與目錄 (可選，但讓 AI 好判斷)
+        const fileList = files.join(', ');
 
         return {
             success: true,
-            fileList,
-            derivedTasks: [
-                { name: "ai_request", args: { prompt: `${currentPrompt}\n---\n【目錄清單】：[${fileList}]\n分析原因：${args.explanation}\n下一步：${args.next_step}` } }
-            ]
+            path: args.path,
+            fileList: fileList
         };
     } catch (err) {
         return {
             success: false,
-            derivedTasks: [
-                { name: "ai_request", args: { prompt: `【系統錯誤】目錄清單獲取失敗：${err.message}` } }
-            ]
+            error: `獲取目錄「${args.path}」失敗：${err.message}`
         };
     }
 });
 
 // 註冊：讀取檔案內容並針對性分析
-registry.register("read_file_content", async (args, { currentPrompt }) => {
+registry.register("read_file_content", async (args) => {
     try {
         const absPath = path.isAbsolute(args.path) ? args.path : path.join(__dirname, '../', args.path);
         const content = await fs.readFile(absPath, 'utf8');
         return {
             success: true,
-            content,
-            derivedTasks: [
-                { name: "ai_request", args: { prompt: `${currentPrompt}\n---\n【檔案內容：${args.path}】\n${content}\n---\n原因：${args.explanation}\n計畫：${args.next_step}` } }
-            ]
+            path: args.path,
+            content: content
         };
     } catch (err) {
         return {
             success: false,
-            derivedTasks: [
-                { name: "ai_request", args: { prompt: `${currentPrompt}\n---\n【系統錯誤】讀取檔案「${args.path}」失敗：${err.message}\n請檢查路徑是否正確。` } }
-            ]
+            error: `讀取檔案「${args.path}」失敗：${err.message}`
         };
     }
 });
@@ -325,23 +321,73 @@ registry.register("update_framework", async (args, { currentPrompt }) => {
     };
 });
 
-// 註冊：任務拆解與規劃
-registry.register("plan", async (args, { currentPrompt }) => {
-    // 遍歷所有計畫步驟，將其全部映射為獨立的 ai_request 任務
-    const nextRequestTasks = args.next_steps_plan.map((step, index) => ({
-        name: "ai_request",
-        args: { prompt: `${currentPrompt}\n---\n規劃已生效（階段 ${index + 1}/${args.next_steps_plan.length}）。\n分析原因：${args.analysis}。\n當前執行計畫：${step}。` }
-    }));
+// 註冊：任務拆解與規劃 (內部執行器版)
+registry.register("plan", async (args, context) => {
+    const { currentPrompt } = context;
+    
+    // 1. 建立一個局部的、獨立的任務執行器
+    const subRegistry = new TaskManager();
+    // 繼承全域的工具處理器與優先級設定
+    subRegistry.handlers = registry.handlers;
+    subRegistry.priorities = registry.priorities;
 
+    console.log(`  [Plan] 🛠️ 開始執行局部任務鏈 (${args.next_steps_plan.length} 個步驟)`);
+
+    // 2. 依序在局部執行器中啟動任務
+    let lastStepFactualResults = ""; // 儲存前一次任務回傳的真實執行結果
+
+    for (const [index, step] of args.next_steps_plan.entries()) {
+        const subTaskArgs = {
+            prompt: `${currentPrompt}\n---\n【前置階段執行結果回報】：\n${lastStepFactualResults || "（這是第一階段，無前置結果）"}\n---\n【當前階段任務目標】：${step}`
+        };
+
+        const subTask = subRegistry.createTask("ai_request", subTaskArgs);
+        
+        // 修改點：現在可以直接接收 executeTask 回傳的結果
+        const taskResult = await subRegistry.executeTask(null, subTask, context);
+
+        // 將結果轉為字串，帶入下一輪循環的 Prompt
+        if (taskResult) {
+            lastStepFactualResults = JSON.stringify(taskResult, null, 2);
+        } else {
+            lastStepFactualResults = "（執行完成，未產生額外回傳數據）";
+        }
+    }
+
+    // 任務鏈已執行完畢
     return {
-        success: true,
-        derivedTasks: nextRequestTasks
+        success: true
     };
 });
 
 // 註冊：更新 UI
 registry.register("update_ui", async (args) => {
     return { success: true, explanation: args.explanation, next_step: args.next_step };
+});
+
+// 註冊：通用子任務執行器 (Batch Executor)
+registry.register("run_subtasks", async (args, context) => {
+    const { tasks } = args; // tasks 格式範例: [{ name: "ai_request", args: { ... } }]
+    
+    if (!tasks || !Array.isArray(tasks)) {
+        return { success: false, error: "無效的子任務清單格式" };
+    }
+
+    const subRegistry = new TaskManager();
+    subRegistry.handlers = registry.handlers;
+    subRegistry.priorities = registry.priorities;
+
+    let lastResult = null;
+
+    console.log(`  [Batch Runner] ⚡ 啟動批次任務執行 (共 ${tasks.length} 步)`);
+
+    for (const item of tasks) {
+        // 建立並執行子任務
+        const subTask = subRegistry.createTask(item.name, item.args);
+        lastResult = await subRegistry.executeTask(null, subTask, context);
+    }
+
+    return lastResult; // 回傳清單中最後一個任務的產出結果
 });
 
 // 註冊：對話發送工具 (切斷 chain)
@@ -412,6 +458,16 @@ ${frameworkDocs}
         }
     }
 
-    return { success: true, derivedTasks };
+    // --- 修改亮點：將收集到的任務，立刻交給 run_subtasks 執行器進行同步處理 ---
+    const subRegistry = new TaskManager();
+    subRegistry.handlers = registry.handlers;
+    subRegistry.priorities = registry.priorities;
+
+    const dispatchTask = subRegistry.createTask("run_subtasks", { tasks: derivedTasks });
+    
+    // 執行同步子任務並回傳最終工具結果
+    const finalResult = await subRegistry.executeTask(null, dispatchTask, context);
+
+    return finalResult;
 });
 

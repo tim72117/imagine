@@ -52,9 +52,9 @@ registry.on('update_framework', 'before', async ({ args }) => {
   }
 });
 
-registry.on('list_sandbox_files', 'after', async ({ args, result }) => {
+registry.on('list_files', 'after', async ({ args, result }) => {
   broadcast({ isNew: true });
-  broadcast({ chunk: `✅ **目錄掃描完成**\n[已發現檔案]：\n\`\`\`\n${result.fileList}\n\`\`\`\n⏭️ **計畫：** ${args.next_step}` });
+  broadcast({ chunk: `✅ **目錄掃描完成**\n[目錄]：\`${args.path}\`\n\`\`\`\n${result.fileList}\n\`\`\`\n⏭️ **計畫：** ${args.next_step}` });
 });
 
 registry.on('read_file_content', 'after', async ({ args }) => {

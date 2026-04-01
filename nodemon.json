@@ -3,5 +3,7 @@
     "server/history/*",
     "src/sandbox/Target.tsx",
     "src/sandbox/Framework.md"
-  ]
+  ],
+  "ext": "js,mjs,json",
+  "delay": "100"
 }
