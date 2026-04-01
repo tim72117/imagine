@@ -78,7 +78,11 @@ const tools = [{
                 properties: {
                     analysis: { type: "STRING", description: "針對大型任務的現狀分析，或針對空泛需求的澄清、假設與困難點拆解邏輯。" },
                     updated_framework: { type: "STRING", description: "根據拆解後的計畫，重新編寫或增修 Framework.md 的內容。" },
-                    next_steps_plan: { type: "STRING", description: "列出具體的執行隊列，明確分階段實作的第一步目標或是預計要釐清的項目。" }
+                    next_steps_plan: {
+                        type: "ARRAY",
+                        items: { type: "STRING" },
+                        description: "預計執行的後續具體計畫步驟，每個步驟將會轉化為一個獨立的推論任務 (ai_request)"
+                    }
                 },
                 required: ["analysis", "updated_framework", "next_steps_plan"]
             }
@@ -154,17 +158,17 @@ class Task {
 class TaskManager {
     constructor() {
         this.handlers = new Map();
-        this.hooks = new Map(); 
+        this.hooks = new Map();
         this.rootTasks = new Map();
         this.priorities = {
             "bootstrap_request": 1,
             "ai_request": 2,          // 最高優先，發出推論請求並展開新任務
-            "list_sandbox_files": 4, 
-            "read_file_content": 5,   
-            "update_framework": 10,  
-            "plan": 20,              
-            "update_ui": 30,         
-            "send_message": 99        
+            "list_sandbox_files": 4,
+            "read_file_content": 5,
+            "update_framework": 10,
+            "plan": 20,
+            "update_ui": 30,
+            "send_message": 99
         };
     }
 
@@ -222,25 +226,19 @@ class TaskManager {
             await this.runHooks(task.name, 'after', { toolName: task.name, args: task.args, result, context, parentTask, task });
 
             // --- 統一任務衍生機制 ---
-            
-            // 1. 處理顯式衍生 (由 handler 解析出的多個子任務)
             if (result.derivedTasks && Array.isArray(result.derivedTasks)) {
                 for (const d of result.derivedTasks) {
+                    // 如果是 ai_request，則檢查循環次數以防止死鎖
+                    if (d.name === "ai_request") {
+                        context.loopCount = (context.loopCount || 0) + 1;
+                        if (context.loopCount > 5) {
+                            console.log(`  [Task] ⚠️ 已達連鎖推論深度上限 (MAX=5)，跳過 ai_request。`);
+                            continue;
+                        }
+                    }
                     task.addTask(d.name, d.args);
                 }
-                console.log(`  [Task] 🧬 從任務 ${task.id} 衍生出 ${result.derivedTasks.length} 個子任務`);
-            }
-
-            // 2. 處理連鎖衍生 (由 handler 宣告的後續推論需求)
-            if (result.triggerNext) {
-                context.loopCount = (context.loopCount || 0) + 1;
-                if (context.loopCount <= 3) {
-                    const targetHostTask = parentTask ? parentTask : task;
-                    targetHostTask.addTask("ai_request", { prompt: result.nextPrompt });
-                    console.log(`  [Task] 🔗 捕獲連鎖推論，於節點 ${targetHostTask.id} 後方掛載新的 ai_request (連鎖深度: ${context.loopCount})`);
-                } else {
-                    console.log(`  [Task] ⚠️ 已達連鎖推論深度上限 (MAX_LOOPS=3)，停止衍生。`);
-                }
+                console.log(`  [Task] 🧬 衍生出 ${result.derivedTasks.length} 個子任務並掛載。`);
             }
         } else {
             // 如果沒有 handler，它只是一個複合群組任務 (Composite Task)
@@ -252,7 +250,7 @@ class TaskManager {
             const pendingTasks = task.tasks.filter(t => t.status === 'pending');
             if (pendingTasks.length === 0) break;
 
-            pendingTasks.sort((a,b) => {
+            pendingTasks.sort((a, b) => {
                 const pA = this.priorities[a.name] || 99;
                 const pB = this.priorities[b.name] || 99;
                 return pA - pB;
@@ -281,14 +279,16 @@ registry.register("list_sandbox_files", async (args, { currentPrompt }) => {
         return {
             success: true,
             fileList,
-            triggerNext: true,
-            nextPrompt: `${currentPrompt}\n---\n【目錄清單】：[${fileList}]\n分析原因：${args.explanation}\n下一步：${args.next_step}`
+            derivedTasks: [
+                { name: "ai_request", args: { prompt: `${currentPrompt}\n---\n【目錄清單】：[${fileList}]\n分析原因：${args.explanation}\n下一步：${args.next_step}` } }
+            ]
         };
     } catch (err) {
         return {
             success: false,
-            triggerNext: true,
-            nextPrompt: `【系統錯誤】目錄清單獲取失敗：${err.message}`
+            derivedTasks: [
+                { name: "ai_request", args: { prompt: `【系統錯誤】目錄清單獲取失敗：${err.message}` } }
+            ]
         };
     }
 });
@@ -301,14 +301,16 @@ registry.register("read_file_content", async (args, { currentPrompt }) => {
         return {
             success: true,
             content,
-            triggerNext: true,
-            nextPrompt: `${currentPrompt}\n---\n【檔案內容：${args.path}】\n${content}\n---\n原因：${args.explanation}\n計畫：${args.next_step}`
+            derivedTasks: [
+                { name: "ai_request", args: { prompt: `${currentPrompt}\n---\n【檔案內容：${args.path}】\n${content}\n---\n原因：${args.explanation}\n計畫：${args.next_step}` } }
+            ]
         };
     } catch (err) {
         return {
             success: false,
-            triggerNext: true,
-            nextPrompt: `${currentPrompt}\n---\n【系統錯誤】讀取檔案「${args.path}」失敗：${err.message}\n請檢查路徑是否正確。`
+            derivedTasks: [
+                { name: "ai_request", args: { prompt: `${currentPrompt}\n---\n【系統錯誤】讀取檔案「${args.path}」失敗：${err.message}\n請檢查路徑是否正確。` } }
+            ]
         };
     }
 });
@@ -317,17 +319,23 @@ registry.register("read_file_content", async (args, { currentPrompt }) => {
 registry.register("update_framework", async (args, { currentPrompt }) => {
     return {
         success: true,
-        triggerNext: true,
-        nextPrompt: `${currentPrompt}\n---\n已更新 Framework.md。下一步計畫是：${args.next_step}。`
+        derivedTasks: [
+            { name: "ai_request", args: { prompt: `${currentPrompt}\n---\n已更新 Framework.md。下一步計畫是：${args.next_step}。` } }
+        ]
     };
 });
 
 // 註冊：任務拆解與規劃
 registry.register("plan", async (args, { currentPrompt }) => {
+    // 遍歷所有計畫步驟，將其全部映射為獨立的 ai_request 任務
+    const nextRequestTasks = args.next_steps_plan.map((step, index) => ({
+        name: "ai_request",
+        args: { prompt: `${currentPrompt}\n---\n規劃已生效（階段 ${index + 1}/${args.next_steps_plan.length}）。\n分析原因：${args.analysis}。\n當前執行計畫：${step}。` }
+    }));
+
     return {
         success: true,
-        triggerNext: true,
-        nextPrompt: `${currentPrompt}\n---\n規劃已生效。分析：${args.analysis}。第一步預計執行計畫：${args.next_steps_plan}。`
+        derivedTasks: nextRequestTasks
     };
 });
 
@@ -338,15 +346,16 @@ registry.register("update_ui", async (args) => {
 
 // 註冊：對話發送工具 (切斷 chain)
 registry.register("send_message", async (args) => {
-    return { success: true, triggerNext: false, text: args.text };
+    return { success: true, text: args.text };
 });
 
 // 註冊：初始轉送 (No-Op UI)
 registry.register("bootstrap_request", async (args) => {
     return {
         success: true,
-        triggerNext: true,
-        nextPrompt: args.user_prompt
+        derivedTasks: [
+            { name: "ai_request", args: { prompt: args.user_prompt } }
+        ]
     };
 });
 
@@ -354,10 +363,10 @@ registry.register("bootstrap_request", async (args) => {
 registry.register("ai_request", async (args, context) => {
     const { getIsAborted } = context;
     const currentPrompt = args.prompt;
-    
+
     // --- 關鍵修復：將推論上下文注入 context，供衍生任務參考 ---
     context.currentPrompt = currentPrompt;
-    
+
     const derivedTasks = [];
 
     const frameworkDocs = await fs.readFile(FRAMEWORK_FILE, 'utf8').catch(() => "// 尚無框架");
@@ -387,8 +396,6 @@ ${frameworkDocs}
         contents: [{ role: "user", parts: [{ text: `${systemInstruction}\nUser Request: ${currentPrompt}` }] }]
     });
 
-    let textBuffer = "";
-
     for await (const chunk of result.stream) {
         if (getIsAborted && getIsAborted()) {
             console.log("[Flow] 生成過程中偵測到中斷。");
@@ -396,28 +403,15 @@ ${frameworkDocs}
         }
         const cand = chunk.candidates?.[0];
         if (!cand?.content?.parts) continue;
-        
         for (const part of cand.content.parts) {
             if (part.functionCall) {
-                // 1. 如果緩衝區有文字，在調用工具前先將文字送出
-                if (textBuffer.trim()) {
-                    derivedTasks.push({ name: "send_message", args: { text: textBuffer.trim() } });
-                    textBuffer = "";
-                }
-                // 2. 加入工具任務
                 derivedTasks.push({ name: part.functionCall.name, args: part.functionCall.args });
             } else if (part.text) {
-                // 3. 累積文字片段
-                textBuffer += part.text;
+                derivedTasks.push({ name: "send_message", args: { text: part.text } });
             }
         }
     }
-    
-    // 4. Stream 結束後，送出最後剩下的文字
-    if (textBuffer.trim()) {
-        derivedTasks.push({ name: "send_message", args: { text: textBuffer.trim() } });
-    }
-    
+
     return { success: true, derivedTasks };
 });
 

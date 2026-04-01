@@ -79,9 +79,13 @@ registry.on('update_ui', 'after', async ({ args }) => {
   broadcast({ chunk: `✨ **UI 實作完成：** ${args.explanation}\n⏭️ **計畫：** ${args.next_step}` });
 });
 
-registry.on('send_message', 'after', async ({ args }) => {
-  broadcast({ isNew: true });
-  broadcast({ chunk: args.text }); // 輸出 AI 最終結語或當前對話
+registry.on('send_message', 'after', async ({ args, context }) => {
+  // 如果是當前任務流程中的第一次發言，才開新泡泡
+  if (!context.isAlreadySpoken) {
+    broadcast({ isNew: true });
+    context.isAlreadySpoken = true;
+  }
+  broadcast({ chunk: args.text }); // 接續傳送內容
 });
 
 app.use(cors({ origin: '*' }));
