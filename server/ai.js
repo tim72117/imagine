@@ -14,6 +14,9 @@ export const TARGET_FILE = path.join(__dirname, '../src/sandbox/Target.tsx');
 export const FRAMEWORK_FILE = path.join(__dirname, '../src/sandbox/Framework.md');
 export const HISTORY_DIR = path.join(__dirname, 'history');
 
+// --- 全域任務樹資料結構 (支援雙向探訪) ---
+export const taskTreeMap = new Map(); // Key: NodeID, Value: Node{ name, args, parent, children, status }
+
 // --- Function Calling 定義 ---
 const tools = [{
     functionDeclarations: [
@@ -104,7 +107,7 @@ const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash", tools: tools
 
 
 // 紀錄回應資訊的函式 (堆疊式，每小時一個檔案)
-export async function recordGeminiResponse(prompt, output, type = "CHAT", rawData = null) {
+export async function recordGeminiResponse({ type = "CHAT", prompt, output, raw = null }) {
     try {
         await fs.ensureDir(HISTORY_DIR);
         const now = new Date();
@@ -122,11 +125,10 @@ export async function recordGeminiResponse(prompt, output, type = "CHAT", rawDat
             timestamp: now.toLocaleString(),
             type,
             prompt,
-            output,
-            raw: rawData // 全量原始資訊
+            output: typeof output === 'object' ? JSON.stringify(output, null, 2) : output,
+            raw
         });
         await fs.writeJson(historyPath, logs, { spaces: 2 });
-        console.log(`[System] [${type}] 回應已堆疊紀錄至: ${fileName} (含 Raw Data)`);
     } catch (error) {
         console.error('[Error] 紀錄失敗:', error);
     }
@@ -139,19 +141,22 @@ class Task {
         this.name = name;
         this.args = args;
         this.targetPrompt = targetPrompt; // 若有 prompt 就是高階推論任務
-        this.tasks = []; // 子任務
+        this.tasks = []; // 子任務列表 (向前探訪)
         this.status = 'pending';
         this.result = null;
         this.createdAt = new Date().toISOString();
-        this.parentTaskId = null; // 關聯父節點/前置節點
-        this.nextTaskId = null;   // 連鎖的下個任務
+        this.parent = null; // 父節點物件引用 (向後探訪)
+        
+        // 自動註冊至全域任務樹
+        taskTreeMap.set(this.id, this);
     }
 
     addTask(name, args) {
         // 子任務 ID 直接繼承父任務
         const childId = `${this.id}-${this.tasks.length + 1}`;
         const task = new Task(childId, name, args);
-        this.tasks.push(task);
+        task.parent = this; // 建立雙向鏈結 (向後)
+        this.tasks.push(task); // 建立雙向鏈結 (向前)
         return task;
     }
 }
@@ -219,22 +224,33 @@ class TaskManager {
         // 1. 執行 Before Hook
         await this.runHooks(task.name, 'before', { toolName: task.name, args: task.args, context, parentTask, task });
 
+        // 1.5 在啟動 Handler 前先行日誌紀錄 (不帶 result)
+        await recordGeminiResponse({
+            type: "TASK_START",
+            prompt: `【Task 啟動執行】：${task.name}`,
+            output: `啟動參數：\n${JSON.stringify(task.args, null, 2)}`,
+            raw: {
+                taskId: task.id,
+                parentTaskId: parentTask?.id,
+                tool: task.name,
+                args: task.args
+            }
+        });
+
         // 2. 執行核心工具邏輯 (Handler)
         // 將當前 task 本身注入 context，供 ai_request 等需要遞迴建立子任務的工具使用
         result = await handler(task.args, { ...context, currentTask: task });
         task.result = result;
 
-        await recordGeminiResponse(
-            `【Task 執行】：${task.name}`,
-            JSON.stringify({ parentTaskId: parentTask?.id, taskId: task.id, args: task.args, result }, null, 2),
-            "TASK_RESULT",
-            { parentTaskId: parentTask?.id, taskId: task.id, tool: task.name, args: task.args }
-        );
-
-        // 3. 統一任務衍生機制 (子任務掛載)
-        if (result.derivedTasks && Array.isArray(result.derivedTasks)) {
-            for (const d of result.derivedTasks) {
-                // 如果是 ai_request，則檢查循環次數以防止死鎖
+        // 3. 統一任務衍生機制 (手動回傳版 - 供尚未完全切換至 addTask 模式的工具使用)
+        const subTaskItems = result.derivedTasks || result.tasks;
+        if (subTaskItems && Array.isArray(subTaskItems)) {
+            for (const d of subTaskItems) {
+                // 如果該任務已經在當前 tasks 裡（可能是工具內已呼叫過 addTask），則跳過
+                if (task.tasks.some(t => t.name === d.name && JSON.stringify(t.args) === JSON.stringify(d.args))) {
+                    continue;
+                }
+                
                 if (d.name === "ai_request") {
                     context.loopCount = (context.loopCount || 0) + 1;
                     if (context.loopCount > 5) {
@@ -244,29 +260,36 @@ class TaskManager {
                 }
                 task.addTask(d.name, d.args);
             }
-            console.log(`  [Task] 🧬 衍生出 ${result.derivedTasks.length} 個子任務並掛載。`);
         }
 
-        // 4. 動態追蹤並消化它底下的所有遞迴子任務
-        while (true) {
-            const pendingTasks = task.tasks.filter(t => t.status === 'pending');
-            if (pendingTasks.length === 0) break;
-
-            pendingTasks.sort((a, b) => {
-                const pA = this.priorities[a.name] || 99;
-                const pB = this.priorities[b.name] || 99;
-                return pA - pB;
-            });
-
-            const currentSubTask = pendingTasks[0];
-            await this.executeTask(task, currentSubTask, context);
-        }
-
-        // 5. 只有當所有子任務都完成後，才執行 After Hook 並將標記主任務完成
+        // 5. 執行 After Hook 並標記完成
         await this.runHooks(task.name, 'after', { toolName: task.name, args: task.args, result, context, parentTask, task });
         task.status = 'completed';
 
-        return result; // 修改點：讓任務執行器會回傳最後的執行結果
+        return result;
+    }
+
+    // 新增方法：深度優先探訪並執行 (支援動態擴展)
+    async traverseAndExecute(task, context = {}) {
+        const parentTask = context.currentParent || null;
+
+        // 1. 執行目前節點 (使用既有的核心執行邏輯)
+        const result = await this.executeTask(parentTask, task, context);
+
+        // 2. 檢查執行完後是否產生了新的分岔 (子任務)
+        // 注意：在我們的任務結構中，子任務會掛載在 task.tasks 陣列裡
+        if (task.tasks && task.tasks.length > 0) {
+            console.log(`  [Walker] 🌳 節點 ${task.id} 執行完畢，發現 ${task.tasks.length} 個分岔，準備深入探訪...`);
+
+            for (const subTask of task.tasks) {
+                // 3. 遞迴探訪各個分岔
+                // 在探訪分岔時，將目前節點設為下一層的 parent
+                await this.traverseAndExecute(subTask, { ...context, currentParent: task });
+            }
+        }
+
+        // 4. 當所有分岔執行完畢，返回上一層 (完成此節點的生命週期)
+        return result;
     }
 }
 
@@ -278,13 +301,11 @@ registry.register("list_files", async (args) => {
         const absPath = path.isAbsolute(args.path) ? args.path : path.join(__dirname, '../', args.path);
         const files = await fs.readdir(absPath);
 
-        // 分類檔案與目錄 (可選，但讓 AI 好判斷)
-        const fileList = files.join(', ');
-
         return {
             success: true,
             path: args.path,
-            fileList: fileList
+            files: files, // 回傳原始陣列，方便程式處理
+            fileList: files.join(', ') // 回傳字串，方便 AI 閱讀
         };
     } catch (err) {
         return {
@@ -383,7 +404,7 @@ registry.register("run_subtasks", async (args, context) => {
         // 1. 建立並執行子任務 (掛載在 run_subtasks 節點下)
         const subTask = registry.createTask(item.name, item.args);
         lastResult = await registry.executeTask(parent, subTask, context);
-        
+
         // 2. 如果任務參數中有 next_step，則基於「真實執行結果」立刻進行下一步推論
         if (item.args && item.args.next_step) {
             console.log(`  [Batch Runner] 🔗 偵測到 next_step，為工具 ${item.name} 啟動連線推論...`);
@@ -403,14 +424,14 @@ registry.register("send_message", async (args) => {
     return { success: true, text: args.text };
 });
 
-// 註冊：初始轉送 (No-Op UI)
-registry.register("bootstrap_request", async (args) => {
-    return {
-        success: true,
-        derivedTasks: [
-            { name: "ai_request", args: { prompt: args.user_prompt } }
-        ]
-    };
+// 註冊：初始入口 (直接掛載版)
+registry.register("bootstrap_request", async (args, context) => {
+    // 1. 直發推論任務至當前節點下 (長出第一個子分岔)
+    context.currentTask.addTask("ai_request", { prompt: args.user_prompt });
+    
+    console.log(`  [Bootstrap] 🚀 系統根任務啟動，已掛載首個推論分支。`);
+    
+    return { success: true };
 });
 
 // 註冊：執行 AI 推論請求 (將 AI 請求本身包裝為任務)
@@ -420,8 +441,6 @@ registry.register("ai_request", async (args, context) => {
 
     // --- 關鍵修復：將推論上下文注入 context，供衍生任務參考 ---
     context.currentPrompt = currentPrompt;
-
-    const derivedTasks = [];
 
     const frameworkDocs = await fs.readFile(FRAMEWORK_FILE, 'utf8').catch(() => "// 尚無框架");
 
@@ -459,19 +478,22 @@ ${frameworkDocs}
         if (!cand?.content?.parts) continue;
         for (const part of cand.content.parts) {
             if (part.functionCall) {
-                derivedTasks.push({ name: part.functionCall.name, args: part.functionCall.args });
+                const name = part.functionCall.name;
+                const toolArgs = part.functionCall.args;
+                
+                // --- 直接使用 Task 分支機制 ---
+                // 此處會建立實體 Task 物件、建立父子關聯、並自動註冊至全域 taskTreeMap
+                context.currentTask.addTask(name, toolArgs);
+                
+                console.log(`  [AI] 🧠 偵測到行動計畫: ${name}，已即時掛載至任務樹。`);
             } else if (part.text) {
-                derivedTasks.push({ name: "send_message", args: { text: part.text } });
+                // 將文字訊息也建立為一個正式的發送任務，以便被走訪器處理
+                context.currentTask.addTask("send_message", { text: part.text });
             }
         }
     }
 
-    // --- 修改亮點：不再使用臨時執行器，直接使用主任務樹的分發機制 ---
-    const dispatchTask = registry.createTask("run_subtasks", { tasks: derivedTasks });
-
-    // 執行同步子任務並回傳結果。傳入 context.currentTask 作為父節點。
-    const finalResult = await registry.executeTask(context.currentTask, dispatchTask, context);
-
-    return finalResult;
+    // 回傳成功，走訪器在執行完本推論任務後，會自動檢查 currentTask.tasks 中新增的分岔
+    return { success: true };
 });
 

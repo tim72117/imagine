@@ -131,9 +131,10 @@ wss.on('connection', (ws) => {
 
       try {
         const rootTask = registry.createTask("bootstrap_request", { user_prompt: prompt });
-        console.log(`[Flow] 🚀 啟動動態衍生任務圖 (根節點: bootstrap_request)...`);
+        console.log(`[Flow] 🚀 啟動任務樹走訪 (根節點: bootstrap_request)...`);
 
-        await registry.executeTask(null, rootTask, { 
+        // 使用 traverseAndExecute 取代原本的 executeTask，達成「深度優先探訪與執行」
+        await registry.traverseAndExecute(rootTask, { 
           getIsAborted: () => isAborted, 
           loopCount: 0 
         });
