@@ -5,8 +5,7 @@ import fs from 'fs-extra';
 import { WebSocketServer } from 'ws';
 import {
   registry,
-  TARGET_FILE,
-  FRAMEWORK_FILE
+  TARGET_FILE
 } from './ai.js';
 
 dotenv.config();
@@ -38,19 +37,6 @@ registry.on('update_ui', 'before', async ({ args }) => {
   }
 });
 
-registry.on('plan', 'before', async ({ args }) => {
-  if (args.updated_framework) {
-    console.log(`[Hook:before] 正在同步計畫規範...`);
-    await fs.writeFile(FRAMEWORK_FILE, args.updated_framework, 'utf8');
-  }
-});
-
-registry.on('update_framework', 'before', async ({ args }) => {
-  if (args.new_content) {
-    console.log(`[Hook:before] 正在更新手冊內容...`);
-    await fs.writeFile(FRAMEWORK_FILE, args.new_content, 'utf8');
-  }
-});
 
 registry.on('list_files', 'after', async ({ args, result }) => {
   broadcast({ isNew: true });
@@ -67,11 +53,6 @@ registry.on('plan', 'after', async ({ args }) => {
   broadcast({ chunk: `🎯 **任務規劃已更新**\n⏭️ **執行計畫：** ${args.next_steps_plan}` });
 });
 
-registry.on('update_framework', 'after', async ({ args }) => {
-  broadcast({ isNew: true });
-  broadcast({ chunk: `✅ **規範同步完成**\n⏭️ **下一階段目標：** ${args.next_step}` });
-});
-
 registry.on('update_ui', 'after', async ({ args }) => {
   broadcast({ type: 'rendering', isLoading: false });
   broadcast({ type: 'refresh' }); // 觸發前端刷新 Sandbox
@@ -79,11 +60,14 @@ registry.on('update_ui', 'after', async ({ args }) => {
   broadcast({ chunk: `✨ **UI 實作完成：** ${args.explanation}\n⏭️ **計畫：** ${args.next_step}` });
 });
 
+
 registry.on('send_message', 'after', async ({ args, context }) => {
   // 如果是當前任務流程中的第一次發言，才開新泡泡
-  if (!context.isAlreadySpoken) {
+  // 使用 context.session 確保跨遞迴、跨分岔共用狀態
+  if (!context.session || !context.session.isAlreadySpoken) {
     broadcast({ isNew: true });
-    context.isAlreadySpoken = true;
+    if (!context.session) context.session = {};
+    context.session.isAlreadySpoken = true;
   }
   broadcast({ chunk: args.text }); // 接續傳送內容
 });
@@ -91,12 +75,6 @@ registry.on('send_message', 'after', async ({ args, context }) => {
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-// 靜態路由 (心跳與代碼獲取)
-app.get('/api/init-framework', async (req, res) => {
-  const exists = await fs.pathExists(FRAMEWORK_FILE);
-  if (!exists) await fs.writeFile(FRAMEWORK_FILE, "# Framework.md", 'utf8');
-  res.json({ success: true });
-});
 
 app.get('/api/get-ui-code', async (req, res) => {
   const code = await fs.readFile(TARGET_FILE, 'utf8');
@@ -136,7 +114,8 @@ wss.on('connection', (ws) => {
         // 使用 traverseAndExecute 取代原本的 executeTask，達成「深度優先探訪與執行」
         await registry.traverseAndExecute(rootTask, { 
           getIsAborted: () => isAborted, 
-          loopCount: 0 
+          loopCount: 0,
+          workDir: path.join(__dirname, '../src/sandbox') // 強制沙盒區域
         });
       } finally {
         isProcessBusy = false;
