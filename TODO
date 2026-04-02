@@ -17,6 +17,8 @@
 
 
 Spawner (衍生器) 或 Orchestrator (協調者) 
+
+worker 可以用文字的方式設定技能
 ---
 ### 目前狀態：已依要求還原至「穩定批次彙整版」。
 
@@ -30,3 +32,30 @@ Spawner (衍生器) 或 Orchestrator (協調者)
     - AI 推論時似乎會重複產生文字片段或重複呼叫 `send_message` 任務。
     - 需檢查 `ai_request` 的解析邏輯與 `generateContentStream` 的 chunk 捕捉方式，確保不會對同一段文字重複派發任務。
 
+---
+
+## 日誌分析與架構問題 (Log Analysis: SESSION-1775139388515)
+### 實作日期：2026-04-02
+
+### 核心發現與原始分析內容
+1. **路徑冗餘與沙盒路徑混淆 (Primary Technical Issue)**
+   - **現象**: Worker 不斷收到 `ENOENT` (找不到檔案) 的錯誤，嘗試開啟的路徑為 `/.../imagine/src/sandbox/src/sandbox/Target.tsx`。
+   - **理由**: 系統預設 `workDir` 為 `src/sandbox`，但 AI 在工具參數中又帶入了重複的路徑。兩者疊加後產生了雙重的 `src/sandbox/` 路徑。
+   - **影響**: AI 耗費了 4-5 輪推論和多次 `list_files` 偵查才找到檔案，造成顯著的 Token 浪費與任務延遲。
+
+2. **協調者的任務拆解邏輯錯誤 (Task Dependency Issue)**
+   - **現象**: 協調者將「讀取 -> 修改 -> 寫回」這類具備 **強烈順序依賴** 的操作發派給了多個並行執行的 Worker。
+   - **理由**: 分派任務時未評估子任務間的相依性，逕行將線性任務視為獨立任務發派。
+   - **影響**: Worker 2 在 Worker 1 出現結果前就嘗試動作，導致競態條件 (Race Condition) 或各個 Worker 重複相同的錯誤流程。
+
+3. **重複調派與多重 Worker 資源競爭 (Over-dispatching)**
+   - **現象**: 在同一個 Session 中，針對同一個「刪除按鈕」目標，出現了多組 Worker 在 Round 1 與 Round 6 被重複啟動。
+   - **影響**: 多個代理人實例在後台同時對同一個 `Target.tsx` 檔案進行操作，導致日誌混亂且工具反饋互相干擾。
+
+4. **「詢問使用者」與「自問自答」的矛盾 (Signal Paradox)**
+   - **現象**: Agent 在 Round 5 正確呼叫 `ask_user`，但在 Round 6 卻立刻表示：「使用者還沒回覆，我直接假設...」並強行推進。
+   - **影響**: 使 `ask_user` 安全機制形同虛設。在自動化流程中，未經回傳訊號就自行下假設，可能導致非預期的破壞性改動。
+
+5. **日誌與狀態追蹤時序脫節 (Log Chronology)**
+   - **現象**: Worker 的詳細執行日誌早於啟動它的 Coordinator 日誌出現（例如 Worker 見於開頭，Coordinator 見於 Line 1028）。
+   - **原因**: 顯示非同步寫入或併行紀錄時缺乏全域排序機制，這使得回溯「任務因果關係」變得困難。

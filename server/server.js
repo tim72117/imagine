@@ -8,8 +8,6 @@ import { fileURLToPath } from 'url';
 import {
   toolbox,
   TARGET_FILE,
-  coordinatorModel,
-  agentModel,
   Coordinator
 } from './ai.js';
 
@@ -130,7 +128,7 @@ wss.on('connection', (ws) => {
 
       try {
         // 1. 使用獨立的協調者元件分析需求並指派任務
-        const coordinator = new Coordinator(coordinatorModel, agentModel, toolbox);
+        const coordinator = new Coordinator();
         await coordinator.coordinate(prompt, {
           getIsAborted: () => isAborted,
           loopCount: 0,

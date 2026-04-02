@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { toolbox, Coordinator, coordinatorModel, agentModel } from './ai';
+import { toolbox, Coordinator } from './ai';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -46,14 +46,14 @@ describe('平坦化執行流程綜合測試', () => {
         callCount = 0;
         capturedPrompts = [];
 
-        const coordinator = new Coordinator(coordinatorModel, agentModel, toolbox);
+        const coordinator = new Coordinator();
         const { sessionId } = await coordinator.coordinate("執行代碼分析", {
             workDir: path.join(__dirname, '../src/sandbox')
         });
 
         // 1. 斷言數據流
-        expect(capturedPrompts[0]).toContain("你是一個資深軟體架構師");
-        expect(capturedPrompts[1]).toContain("你是一個具備「思考與執行合一」能力的高級前端工程師");
+        expect(capturedPrompts[0]).toContain("你是一個強大的【任務協調者");
+        expect(capturedPrompts[1]).toContain("你是一個具備「思考與執行合一」能力的高級前端工程師 Worker");
         
         // 2. 斷言 Session
         expect(sessionId).toBeDefined();
