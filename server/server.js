@@ -8,7 +8,8 @@ import { fileURLToPath } from 'url';
 import {
   toolbox,
   TARGET_FILE,
-  model,
+  coordinatorModel,
+  agentModel,
   Coordinator
 } from './ai.js';
 
@@ -42,6 +43,18 @@ toolbox.on('update_file', 'before', async ({ args }) => {
     console.log(`[Hook:before] 正在寫入檔案代碼至 ${TARGET_FILE}...`);
     await fs.writeFile(TARGET_FILE, args.code, 'utf8');
   }
+});
+
+toolbox.on('list_files', 'before', async ({ args }) => {
+  broadcast({ statusMessage: `🔍 正在偵查目錄: ${args.path}...` });
+});
+
+toolbox.on('read_file_content', 'before', async ({ args }) => {
+  broadcast({ statusMessage: `📖 正在分析檔案內容: ${args.path}...` });
+});
+
+toolbox.on('plan', 'before', async ({ args }) => {
+  broadcast({ statusMessage: `📋 正在進行多階段開發規劃...` });
 });
 
 toolbox.on('list_files', 'after', async ({ args, result }) => {
@@ -117,7 +130,7 @@ wss.on('connection', (ws) => {
 
       try {
         // 1. 使用獨立的協調者元件分析需求並指派任務
-        const coordinator = new Coordinator(model, toolbox);
+        const coordinator = new Coordinator(coordinatorModel, agentModel, toolbox);
         await coordinator.coordinate(prompt, {
           getIsAborted: () => isAborted,
           loopCount: 0,

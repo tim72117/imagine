@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { toolbox, Coordinator, model } from './ai';
+import { toolbox, Coordinator, coordinatorModel, agentModel } from './ai';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -46,7 +46,7 @@ describe('平坦化執行流程綜合測試', () => {
         callCount = 0;
         capturedPrompts = [];
 
-        const coordinator = new Coordinator(model, toolbox);
+        const coordinator = new Coordinator(coordinatorModel, agentModel, toolbox);
         const { sessionId } = await coordinator.coordinate("執行代碼分析", {
             workDir: path.join(__dirname, '../src/sandbox')
         });
