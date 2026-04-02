@@ -13,8 +13,8 @@ const __dirname = path.dirname(__filename);
 export const TARGET_FILE = path.join(__dirname, '../src/sandbox/Target.tsx');
 export const HISTORY_DIR = path.join(__dirname, 'history');
 
-// --- 全域任務樹資料結構 (支援雙向探訪) ---
-export const taskTreeMap = new Map(); // Key: NodeID, Value: Node{ name, args, parent, children, status }
+// --- 系統狀態追蹤 (平直化) ---
+export const session_logs = new Map(); // 用於儲存各 session 的平直日誌摘要
 
 // --- Function Calling 定義 ---
 const tools = [{
@@ -71,7 +71,7 @@ const tools = [{
                     next_steps_plan: {
                         type: "ARRAY",
                         items: { type: "STRING" },
-                        description: "預計執行的後續具體計畫步驟，每個步驟將會轉化為一個獨立的推論任務 (ai_request)"
+                        description: "預計執行的後續具體計畫步驟"
                     }
                 },
                 required: ["analysis", "next_steps_plan"]
@@ -99,11 +99,27 @@ function getToolDescriptionPrompt() {
 }
 
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
-const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash", tools: tools });
+export const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash", tools: tools });
 
+// --- 系統提示詞範本 (Prompts) ---
+const COORDINATOR_SYSTEM_PROMPT = `你是一個資深軟體架構師。請讀取以下使用者需求，並將其轉化為一個明確、具備技術細節的【執行目標 (Goal)】。
+回傳內容應包含分析背景與具體目標的結構化純文字描述。`;
 
+const AGENT_SYSTEM_PROMPT = `你是一個具備「思考與執行合一」能力的高級前端工程師 Agent。
+注意：【禁止憑空推論】。如果你的上下文不足以支撐對現有專案實作的精確理解，【必須】立刻呼叫工具進行主動偵查。
 
-// 紀錄回應資訊的函式 (堆疊式，每小時一個檔案)
+【專案執行原則】：
+1. **分析先行**: 接收到需求後，若未掌握具體檔案結構或編碼細節，或是需求本身過於空泛抽象，請優先使用偵查類工具或 \`plan\` 工具。
+2. **透明度**: 所有說明與分析流程請一律使用【繁體中文】。
+
+【執行流程 (SOP)】：
+1. **探索與釐理階段 (Discovery & Clarify)**: 調用偵查工具與 \`list_files\` 獲取現況。
+2. **決議與規劃階段 (Reasoning & Plan)**: 使用 \`plan\` 工具梳理多階段開發步驟。
+3. **執行階段 (Implementation)**: 呼叫 \`update_file\` 套用代碼變動。
+4. **回報階段 (Reporting)**: 完成所有變動後，【必須】呼叫 \`send_message\` 提供彙報並結束連鎖。
+`;
+
+// 紀錄回應資訊的函式
 export async function recordGeminiResponse({ type = "CHAT", prompt, output, data = null }) {
     try {
         await fs.ensureDir(HISTORY_DIR);
@@ -135,67 +151,18 @@ export async function recordGeminiResponse({ type = "CHAT", prompt, output, data
     }
 }
 
-// --- 階層型 Task 領域模型 ---
-class Task {
-    constructor(id, name, args = {}, targetPrompt = null) {
-        this.id = id;
-        this.name = name;
-        this.args = args;
-        this.targetPrompt = targetPrompt; // 若有 prompt 就是高階推論任務
-        this.tasks = []; // 子任務列表 (向前探訪)
-        this.status = 'pending';
-        this.result = null;
-        this.createdAt = new Date().toISOString();
-        this.parent = null; // 父節點物件引用 (向後探訪)
-
-        // 自動註冊至全域任務樹
-        taskTreeMap.set(this.id, this);
-    }
-
-    addTask(name, args) {
-        // 子任務 ID 直接繼承父任務
-        const childId = `${this.id}-${this.tasks.length + 1}`;
-        const task = new Task(childId, name, args);
-        task.parent = this; // 建立雙向鏈結 (向後)
-        this.tasks.push(task); // 建立雙向鏈結 (向前)
-        return task;
-    }
-}
-
-class TaskManager {
+class Toolbox {
     constructor() {
         this.handlers = new Map();
         this.hooks = new Map();
-        this.rootTasks = new Map();
-        this.priorities = {
-            "bootstrap_request": 1,
-            "ai_request": 2,          // 最高優先，發出推論請求並展開新任務
-            "list_files": 4,
-            "read_file_content": 5,
-            "plan": 20,
-            "update_file": 30,
-            "ask_user": 99,
-            "send_message": 99
-        };
     }
 
-    createTask(name, args = {}, prompt = null) {
-        const id = `TASK-${Date.now()}`;
-        const task = new Task(id, name, args, prompt);
-        task.status = 'active';
-        this.rootTasks.set(id, task);
-        console.log(`\n[Task] 🚀 建立高階任務 (Task ID: ${id})`);
-        return task;
-    }
-
-    // 註冊鉤子方法
     on(toolName, stage, callback) {
         const key = `${toolName}:${stage}`;
         if (!this.hooks.has(key)) this.hooks.set(key, []);
         this.hooks.get(key).push(callback);
     }
 
-    // 執行鉤子的內部方法
     async runHooks(toolName, stage, data) {
         const hooks = this.hooks.get(`${toolName}:${stage}`) || [];
         const globalHooks = this.hooks.get(`*:${stage}`) || [];
@@ -208,345 +175,221 @@ class TaskManager {
         this.handlers.set(toolName, handler);
     }
 
-    // 支援遞迴的 Task 執行器
-    async executeTask(parentTask, task, context = {}) {
-        // 確保 session 存在於 context 中，供所有 Task 共用狀態 (如 isAlreadySpoken)
+    async execute_tool(name, args, context = {}) {
         if (!context.session) context.session = {};
-
-        const handler = this.handlers.get(task.name);
-
+        const handler = this.handlers.get(name);
         if (!handler) {
-            console.error(`  [Task] ❌ 找不到任務處理器: ${task.name} (Task ID: ${task.id})`);
-            task.status = 'error';
-            return;
+            console.error(`  [Tool] ❌ 找不到工具處理器: ${name}`);
+            return { success: false, error: 'unknown_tool' };
         }
 
-        let result = null;
-        task.status = 'running';
-        console.log(`  [Task] 派發任務: ${task.name} (Task ID: ${task.id})`);
+        const stepId = `STEP-${Date.now()}`;
+        console.log(`  [Tool] 🔧 執行工具: ${name} (${stepId})`);
 
-        // 1. 執行 Before Hook
-        await this.runHooks(task.name, 'before', { toolName: task.name, args: task.args, context, parentTask, task });
-
-        // 1.5 在啟動 Handler 前先行日誌紀錄
+        await this.runHooks(name, 'before', { toolName: name, args, context });
         await recordGeminiResponse({
-            type: "TASK_START",
-            prompt: `【Task 啟動】：${task.name}`,
-            output: task.args,
-            data: {
-                id: task.id,
-                parentId: parentTask?.id,
-                name: task.name,
-                args: task.args,
-                session_id: context.sessionId
-            }
+            type: "TOOL_START",
+            prompt: `【工具啟動】：${name}`,
+            output: args,
+            data: { id: stepId, name, args, session_id: context.sessionId }
         });
 
-        // 2. 執行核心工具邏輯 (Handler)
-        // 將當前 task 本身注入 context，供 ai_request 等需要遞迴建立子任務的工具使用
-        result = await handler(task.args, { ...context, currentTask: task });
-        task.result = result;
+        const result = await handler(args, context);
 
-        // 2.5 紀錄執行完成日誌 (包含結果)
         await recordGeminiResponse({
-            type: "TASK_RESULT",
-            prompt: `【Task 完成】：${task.name}`,
+            type: "TOOL_RESULT",
+            prompt: `【工具完成】：${name}`,
             output: result,
-            data: {
-                id: task.id,
-                parentId: parentTask?.id,
-                name: task.name,
-                result: result,
-                session_id: context.sessionId
-            }
+            data: { id: stepId, name, result, session_id: context.sessionId }
         });
 
-        // 3. 執行 After Hook 並標記完成
-        await this.runHooks(task.name, 'after', { toolName: task.name, args: task.args, result, context, parentTask, task });
-        task.status = 'completed';
-
+        await this.runHooks(name, 'after', { toolName: name, args, result, context });
         return result;
-    }
-
-    // 新增方法：深度優先探訪並執行 (支援動態擴展)
-    async traverseAndExecute(rootTask, context = {}) {
-        let current = rootTask;
-        context.session = context.session || {};
-        context.visitCount = 0; // 追蹤已執行的任務總數
-
-        console.log(`  [Walker] 🚶 啟動指標走訪器 (Root: ${rootTask.id})`);
-
-        while (current) {
-            // 0. 如果已執行超過 10 個任務，基於預算限制主動停止
-            if (context.visitCount >= 10) {
-                console.warn(`  [Walker] ⚠️ 達到最大造訪任務數限制 (10)，終止走訪流程。`);
-                break;
-            }
-
-            // 1. 執行目前節點 (如果尚未執行)
-            if (current.status === 'pending' || current.status === 'active') {
-                context.visitCount++; // 累計執行次數
-                const result = await this.executeTask(current.parent, current, context);
-
-                // --- 核心進化：動態偵測連鎖反饋 (Next Step Chaining) ---
-                if (current.parent && current.args?.next_step) {
-                    console.log(`  [Walker] 🔗 偵測到 ${current.name} 帶有 next_step，動態掛載回饋...`);
-                    const feedbackPrompt = `【工具執行完成回報】\n原始計畫：${current.args.next_step}\n實際產出數據：\n${JSON.stringify(result, null, 2)}\n\n請根據以上真實情況，繼續進行開發或判斷下一步。`;
-                    current.parent.addTask("ai_request", { prompt: feedbackPrompt });
-                }
-            }
-
-            // 2. 判斷下一個移動指標 (DFS 順序)
-
-            // A. 向下探訪 (Down)
-            const unvisitedChild = current.tasks.find(t => t.status === 'pending' || t.status === 'active');
-            if (unvisitedChild) {
-                current = unvisitedChild;
-                continue;
-            }
-
-            // B. 子節點跑完，嘗試移動至下一個兄弟節點 (Right) 或 回溯 (Up)
-            if (current === rootTask) break; // 根部完成
-
-            let foundNext = false;
-            let tracer = current;
-
-            while (tracer && tracer !== rootTask) {
-                // 彙總結果至父節點 (模擬遞迴回傳)
-                if (tracer.parent && (tracer.status === 'completed' || tracer.status === 'error')) {
-                    tracer.parent.result = tracer.parent.result || {};
-                    tracer.parent.result.subResults = tracer.parent.result.subResults || [];
-                    if (!tracer.parent.result.subResults.find(r => r.id === tracer.id)) {
-                        tracer.parent.result.subResults.push({ id: tracer.id, name: tracer.name, result: tracer.result });
-                    }
-                }
-
-                const siblings = tracer.parent.tasks;
-                const myIndex = siblings.indexOf(tracer);
-
-                if (myIndex < siblings.length - 1) {
-                    current = siblings[myIndex + 1];
-                    foundNext = true;
-                    break;
-                }
-
-                // 無兄弟則繼續向上
-                tracer = tracer.parent;
-            }
-
-            if (!foundNext) {
-                current = null;
-            }
-        }
-
-        console.log(`  [Walker] 🏁 指標走訪結束。`);
-        return rootTask.result;
     }
 }
 
-export const registry = new TaskManager();
+export const toolbox = new Toolbox();
 
-// 註冊：目錄清單讀取 (通用版)
-registry.register("list_files", async (args, context) => {
+// 註冊工具
+toolbox.register("list_files", async (args, context) => {
     try {
         const base = context.workDir || path.join(__dirname, '../');
         const absPath = path.isAbsolute(args.path) ? args.path : path.join(base, args.path);
         const files = await fs.readdir(absPath);
-
-        // 將檔案轉換為相對於工作目錄的相對路徑
-        const relativeFiles = files.map(file => {
-            const fullPath = path.join(absPath, file);
-            return path.relative(base, fullPath);
-        });
-
-        return {
-            success: true,
-            path: args.path,
-            files: relativeFiles, // 回傳相對路徑陣列
-            fileList: relativeFiles.join(', ') // 回傳相對路徑字串
-        };
-    } catch (err) {
-        return {
-            success: false,
-            error: `獲取目錄「${args.path}」失敗：${err.message}`
-        };
-    }
+        const relativeFiles = files.map(file => path.relative(base, path.join(absPath, file)));
+        return { success: true, path: args.path, files: relativeFiles, fileList: relativeFiles.join(', ') };
+    } catch (err) { return { success: false, error: err.message }; }
 });
 
-// 註冊：讀取檔案內容並針對性分析
-registry.register("read_file_content", async (args, context) => {
+toolbox.register("read_file_content", async (args, context) => {
     try {
         const base = context.workDir || path.join(__dirname, '../');
         const absPath = path.isAbsolute(args.path) ? args.path : path.join(base, args.path);
         const content = await fs.readFile(absPath, 'utf8');
-        return {
-            success: true,
-            path: args.path,
-            content: content
-        };
-    } catch (err) {
-        return {
-            success: false,
-            error: `讀取檔案「${args.path}」失敗：${err.message}`
-        };
-    }
+        return { success: true, path: args.path, content };
+    } catch (err) { return { success: false, error: err.message }; }
 });
 
-// 註冊：任務拆解與規劃 (內部執行器版)
-// 註冊：規劃工具 (將複雜計畫分解為多個推論分支)
-registry.register("plan", async (args, context) => {
-    const parent = context.currentTask;
-
-    console.log(`  [Plan] 🛠️ 為當前節點掛載計畫分支 (${args.next_steps_plan.length} 個步驟)`);
-
-    // 動態掛載計畫好的推論步驟
-    for (const step of args.next_steps_plan) {
-        parent.addTask("ai_request", { prompt: step });
-    }
-
-    return {
-        success: true,
-        message: `已建立 ${args.next_steps_plan.length} 個計畫步驟並掛載。`
-    };
+toolbox.register("plan", async (args) => {
+    console.log(`  [Plan] 🛠️ 生成計畫 (${args.next_steps_plan.length} 步)`);
+    return { success: true, plan: args.next_steps_plan };
 });
 
-// 註冊：更新檔案內容 (實體寫入版)
-registry.register("update_file", async (args, context) => {
+toolbox.register("update_file", async (args, context) => {
     try {
         const base = context.workDir || path.join(__dirname, '../src/sandbox');
         const targetPath = path.join(base, 'Target.tsx');
-
         await fs.writeFile(targetPath, args.code);
-        console.log(`  [File] 📁 已更新檔案內容至: ${targetPath}`);
+        return { success: true, path: targetPath, explanation: args.explanation };
+    } catch (err) { return { success: false, error: err.message }; }
+});
 
-        return {
-            success: true,
-            path: targetPath,
-            explanation: args.explanation,
-            next_step: args.next_step
-        };
-    } catch (err) {
-        console.error(`  [File] ❌ 更新失敗:`, err);
-        return { success: false, error: err.message };
+toolbox.register("send_message", async (args) => ({ success: true, text: args.text }));
+toolbox.register("ask_user", async (args) => ({ success: true, question: args.question }));
+
+// --- 獨立協調者元件 (Coordinator) ---
+export class Coordinator {
+    constructor(inferenceModel, taskRegistry) {
+        this.model = inferenceModel;
+        this.toolbox = taskRegistry;
     }
-});
 
-// 註冊：通用子任務執行器 (Batch Executor)
-// 已移除：run_subtasks (已被全域分岔走訪器取代)
+    async reasoning(args, context) {
+        const { getIsAborted } = context;
+        const userInstruction = args.prompt;
+        context.lastUserPrompt = userInstruction;
+        const completeInstruction = `${AGENT_SYSTEM_PROMPT}\n${getToolDescriptionPrompt()}\nUser Request: ${userInstruction}`;
+        const engine = new AIEngine(this.model);
+        return await engine.generate(completeInstruction, { getIsAborted });
+    }
 
-// 註冊：對話發送工具 (切斷 chain)
-registry.register("send_message", async (args) => {
-    return { success: true, text: args.text };
-});
+    async coordinate(userPrompt, executionContext = {}) {
+        console.log(`  [Coordinator] 🧠 正在分析與轉化需求...`);
+        const engine = new AIEngine(this.model);
+        const { text: analyzedGoal } = await engine.generate(`${COORDINATOR_SYSTEM_PROMPT}\n需求：${userPrompt}`);
+        const finalGoal = analyzedGoal || userPrompt;
 
-// 註冊：詢問使用者工具 (暫停 chain)
-registry.register("ask_user", async (args) => {
-    return { success: true, question: args.question };
-});
+        const sessionId = `SESSION-${Date.now()}`;
 
-// 註冊：初始入口 (自動化思維迴圈與執行主控)
-registry.register("bootstrap_request", async (args, context) => {
-    const finalGoal = args.user_prompt;
-    let currentInput = `【最終目標】：${finalGoal}\n\n請根據目標開始第一輪思考與偵查。`;
-    const MAX_ROUNDS = context.loopCountLimit || 5;
+        // 紀錄完整任務目標與 Session 啟動
+        await recordGeminiResponse({
+            type: "MISSION_START",
+            prompt: userPrompt,
+            output: finalGoal,
+            data: { session_id: sessionId, analyzed_goal: analyzedGoal }
+        });
 
-    console.log(`  [Bootstrap] 🚀 啟動執行主控迴圈 (上限 ${MAX_ROUNDS} 輪)`);
+        // 委派給執行者 (Executor) 達成目標
+        const executor = new Executor(this.model, this.toolbox);
+        await executor.run(finalGoal, { ...executionContext, sessionId });
 
-    for (let i = 0; i < MAX_ROUNDS; i++) {
-        console.log(`  [Bootstrap] 🔄 進入第 ${i + 1} 輪推論與執行`);
+        return { success: true, sessionId };
+    }
+}
 
-        // 1. 向 AI 請求推論
-        const aiTask = context.currentTask.addTask("ai_request", { prompt: currentInput });
-        const inference = await registry.executeTask(context.currentTask, aiTask, context);
+// --- 獨立 AI 推論引擎 (AIEngine) ---
+export class AIEngine {
+    constructor(inferenceModel) { this.model = inferenceModel; }
+    /**
+     * 封裝產生器，維持傳統 Promise 介面 (用於不需要即時響應工具的場景)
+     */
+    async generate(inputPrompt, context = {}) {
+        const stream = this.generateStream(inputPrompt, context);
+        let finalResult = null;
+        for await (const chunk of stream) {
+            if (chunk.type === 'final') finalResult = chunk;
+        }
+        return finalResult;
+    }
 
-        // 2. 在內部解析並執行 AI 要求的動作 (Function Calls)
-        let actionResults = [];
-        if (inference.actions && inference.actions.length > 0) {
-            console.log(`  [Bootstrap] 🛠️ 偵測到 ${inference.actions.length} 個動作，開始序列執行...`);
-            for (const action of inference.actions) {
-                const subTask = context.currentTask.addTask(action.name, action.args);
-                const res = await registry.executeTask(context.currentTask, subTask, context);
-                actionResults.push({ tool: action.name, result: res, next_step: action.args?.next_step });
+    /**
+     * 非同步產生器：即時傳回工具呼叫，最後傳回完整結果
+     */
+    async *generateStream(inputPrompt, { getIsAborted } = {}) {
+        const streamResponse = await this.model.generateContentStream({
+            contents: [{ role: "user", parts: [{ text: inputPrompt }] }]
+        });
+        const allActions = [];
+        let accumulatedText = "";
+
+        for await (const chunk of streamResponse.stream) {
+            if (getIsAborted?.()) break;
+            const candidate = chunk.candidates?.[0];
+            if (!candidate?.content?.parts) continue;
+
+            for (const part of candidate.content.parts) {
+                if (part.text) accumulatedText += part.text;
+                if (part.functionCall) {
+                    const action = { name: part.functionCall.name, args: part.functionCall.args };
+                    allActions.push(action);
+                    yield { type: 'action', action }; // 即時 yield 工具
+                }
             }
         }
+        yield { type: 'final', text: accumulatedText, actions: allActions };
+    }
+}
 
-        // 3. 判斷主動終止
-        const hasTerminator = inference.actions?.some(a => a.name === 'send_message' || a.name === 'ask_user');
-        if (hasTerminator) {
-            console.log(`  [Bootstrap] 🛑 AI 已發出終端指標，結束主控迴圈。`);
-            break;
-        }
+// --- 獨立執行器 (Executor) ---
+// 職責：接收目標，透過連鎖思維與工具調用「達成目標」，達成後才結束並回覆。
+export class Executor {
+    constructor(inferenceModel, taskRegistry) {
+        this.model = inferenceModel;
+        this.toolbox = taskRegistry;
+    }
 
-        // 4. 彙整結果至下一輪 (包含思考與結構化的工具回饋)
-        let feedback = `【上一步推論分析】：\n${inference.text || "(無分析背景)"}\n\n`;
-        if (actionResults.length > 0) {
-            feedback += `【實時工具執行回傳】：\n`;
-            actionResults.forEach(ar => {
-                feedback += `🛠️ 調用工具：[${ar.tool}]\n結果數據：\n${JSON.stringify(ar.result, null, 2)}\n\n`;
+    async run(targetGoal, context) {
+        let nextInput = `【最終目標】：${targetGoal}\n\n請開始第一輪思考。`;
+        const MAX_ROUNDS = context.loopCountLimit || 5;
+
+        for (let round = 0; round < MAX_ROUNDS; round++) {
+            console.log(`  [Executor] 🔄 第 ${round + 1} 輪 (Streaming)`);
+            const stepId = `STEP-${Date.now()}`;
+            await recordGeminiResponse({ 
+                type: "THINK_START", 
+                prompt: nextInput, 
+                data: { id: stepId, session_id: context.sessionId, target_goal: targetGoal } 
             });
-        }
 
-        currentInput = `【最終目標】：${finalGoal}\n\n${feedback}請根據以上推論分析與工具執行結果，判斷是否需要繼續執行後續步驟、或直接回報完成。`;
-    }
+            let aiResponse = null;
+            let toolResults = [];
 
-    return { success: true };
-});
-
-// 註冊：執行 AI 推論請求 (將 AI 請求本身包裝為任務)
-registry.register("ai_request", async (args, context) => {
-    const { getIsAborted } = context;
-    const currentPrompt = args.prompt;
-
-    // --- 關鍵修復：將推論上下文注入 context，供衍生任務參考 ---
-    context.currentPrompt = currentPrompt;
-
-    const workDir = context.workDir || path.join(__dirname, '../src/sandbox');
-
-    const systemInstruction = `你是一個具備「思考與執行合一」能力的高級前端工程師 Agent。
-注意：【禁止憑空推論】。如果你的上下文不足以支撐對現有專案實作的精確理解，【必須】立刻呼叫工具進行主動偵查。
-
-【專案執行原則】：
-1. **分析先行**: 接收到需求後，若未掌握具體檔案結構或編碼細節，或是需求本身過於空泛抽象，請優先使用偵查類工具或 \`plan\` 工具。
-2. **透明度**: 所有說明與分析流程請一律使用【繁體中文】。
-
-【執行流程 (SOP)】：
-1. **探索與釐理階段 (Discovery & Clarify)**: 調用偵查工具與 \`list_files\` 獲取現況。
-2. **決議與規劃階段 (Reasoning & Plan)**: 使用 \`plan\` 工具梳理多階段開發步驟。
-3. **執行階段 (Implementation)**: 呼叫 \`update_file\` 套用代碼變動。
-4. **回報階段 (Reporting)**: 完成所有變動後，【必須】呼叫 \`send_message\` 提供彙報並結束連鎖。
-
-${getToolDescriptionPrompt()}
-`;
-
-    const result = await model.generateContentStream({
-        contents: [{ role: "user", parts: [{ text: `${systemInstruction}\nUser Request: ${currentPrompt}` }] }]
-    });
-    // 3. 收集結果並回傳建議 Action，不主動掛載子任務
-    const actions = [];
-    let textResult = "";
-
-    for await (const chunk of result.stream) {
-        if (getIsAborted && getIsAborted()) {
-            console.log("[Flow] 生成過程中偵測到中斷。");
-            break;
-        }
-
-        const cand = chunk.candidates?.[0];
-        if (!cand?.content?.parts) continue;
-
-        for (const part of cand.content.parts) {
-            if (part.text) {
-                textResult += part.text;
+            // 開始迭代 AI 的串流回應
+            const thinkStream = this._think(nextInput, context);
+            for await (const chunk of thinkStream) {
+                if (chunk.type === 'action') {
+                    // 【即時執行工具】：工具一被產出就立刻執行，不需要等整段話講完
+                    const result = await this.toolbox.execute_tool(chunk.action.name, chunk.action.args, context);
+                    toolResults.push({ name: chunk.action.name, output: result });
+                } else if (chunk.type === 'final') {
+                    // 取得最終彙整結果
+                    aiResponse = chunk;
+                }
             }
-            if (part.functionCall) {
-                actions.push({
-                    name: part.functionCall.name,
-                    args: part.functionCall.args
-                });
-            }
+
+            await recordGeminiResponse({ 
+                type: "THINK_RESULT", 
+                prompt: `【思維完成】：${stepId}`, 
+                output: aiResponse, 
+                data: { id: stepId, session_id: context.sessionId } 
+            });
+
+            // 如果 AI 呼叫了回報類工具，則視為達成目標或需要中斷，結束循環
+            if (aiResponse.actions.some(a => ['send_message', 'ask_user'].includes(a.name))) break;
+
+            nextInput = `【最終目標】：${targetGoal}\n\n【分析】：${aiResponse.text}\n【工具結果】：${JSON.stringify(toolResults)}\n下一步？`;
         }
     }
 
-    return { text: textResult, actions };
-});
+    /**
+     * 執行一次 AI 推論分析 (Agent 思維路徑)，傳回串流產生器
+     */
+    _think(prompt, context) {
+        const { getIsAborted } = context;
+        context.lastUserPrompt = prompt;
+        const completeInstruction = `${AGENT_SYSTEM_PROMPT}\n${getToolDescriptionPrompt()}\nUser Request: ${prompt}`;
+        const engine = new AIEngine(this.model);
+        return engine.generateStream(completeInstruction, { getIsAborted });
+    }
+}
 

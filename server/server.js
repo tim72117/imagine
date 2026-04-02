@@ -6,8 +6,10 @@ import fs from 'fs-extra';
 import { WebSocketServer } from 'ws';
 import { fileURLToPath } from 'url';
 import {
-  registry,
-  TARGET_FILE
+  toolbox,
+  TARGET_FILE,
+  model,
+  Coordinator
 } from './ai.js';
 
 dotenv.config();
@@ -30,7 +32,7 @@ const broadcast = (data) => {
 // --- 註冊 工具鉤子 (Hooks) ---
 // 註解：現在我們直接使用 broadcast，不再依賴 context.onChunk
 
-registry.on('update_file', 'before', async ({ args }) => {
+toolbox.on('update_file', 'before', async ({ args }) => {
   if (args.code) {
     broadcast({ type: 'rendering', isLoading: true });
 
@@ -42,27 +44,27 @@ registry.on('update_file', 'before', async ({ args }) => {
   }
 });
 
-registry.on('list_files', 'after', async ({ args, result }) => {
+toolbox.on('list_files', 'after', async ({ args, result }) => {
   broadcast({ statusMessage: `✅ 目錄掃描完成: ${args.path}` });
 });
 
-registry.on('read_file_content', 'after', async ({ args }) => {
+toolbox.on('read_file_content', 'after', async ({ args }) => {
   broadcast({ statusMessage: `✅ 分析檔案成功: ${args.path}` });
 });
 
-registry.on('plan', 'after', async ({ args }) => {
+toolbox.on('plan', 'after', async ({ args }) => {
   broadcast({ isNew: true });
   broadcast({ chunk: `🎯 **任務規劃已更新**\n⏭️ **執行計畫：** ${args.next_steps_plan}` });
 });
 
-registry.on('update_file', 'after', async ({ args }) => {
+toolbox.on('update_file', 'after', async ({ args }) => {
   broadcast({ type: 'rendering', isLoading: false });
   broadcast({ type: 'refresh' }); // 觸發前端刷新 Sandbox
   broadcast({ statusMessage: `✨ 代碼實作完成: ${args.explanation}` });
 });
 
 
-registry.on('send_message', 'after', async ({ args, context }) => {
+toolbox.on('send_message', 'after', async ({ args, context }) => {
   // 如果是當前任務流程中的第一次發言，才開新泡泡
   // 使用 context.session 確保跨遞迴、跨分岔共用狀態
   if (!context.session || !context.session.isAlreadySpoken) {
@@ -73,7 +75,7 @@ registry.on('send_message', 'after', async ({ args, context }) => {
   broadcast({ chunk: args.text }); // 接續傳送內容
 });
 
-registry.on('ask_user', 'after', async ({ args }) => {
+toolbox.on('ask_user', 'after', async ({ args }) => {
   broadcast({ isNew: true });
   broadcast({ chunk: `❓ **AI 正在詢問：**\n\n${args.question}` });
 });
@@ -114,14 +116,11 @@ wss.on('connection', (ws) => {
       isProcessBusy = true;
 
       try {
-        const rootTask = registry.createTask("bootstrap_request", { user_prompt: prompt });
-        console.log(`[Flow] 🚀 啟動任務樹走訪 (根節點: bootstrap_request)...`);
-
-        // 使用 traverseAndExecute 取代原本的 executeTask，達成「深度優先探訪與執行」
-        await registry.traverseAndExecute(rootTask, {
+        // 1. 使用獨立的協調者元件分析需求並指派任務
+        const coordinator = new Coordinator(model, toolbox);
+        await coordinator.coordinate(prompt, {
           getIsAborted: () => isAborted,
           loopCount: 0,
-          sessionId: rootTask.id, // 使用根任務 ID 作為對話 Session ID
           workDir: path.join(__dirname, '../src/sandbox') // 強制沙盒區域
         });
       } finally {
