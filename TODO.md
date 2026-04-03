@@ -15,7 +15,6 @@
 - **優點**: 極致的實時感，對話與動作的先後順序完全透明。
 - **缺點**: 對後端 `while` 迴圈與 `registry` 的執行頻率要求較高，且文字片段過小時可能導致過多零碎泡泡（需加強 Trim/Buffer 判斷）。
 
-
 Spawner (衍生器) 或 Orchestrator (協調者) 
 
 worker 可以用文字的方式設定技能
@@ -25,10 +24,13 @@ worker 可以用文字的方式設定技能
 ---
 
 ## 待執行議題 (Pending Tasks)
-1. **規劃後細節詢問機制 (Post-Plan Detail Querying)**:
+1. **TODO: 將 AIEngine 實作改為全域單一佇列請求方式。**:
+    - [ ] 支援設定一次可並發請求數。
+    - [ ] 支援設定每秒請求數量 (Rate Limiting)，避免觸發 API 限制。
+2. **規劃後細節詢問機制 (Post-Plan Detail Querying)**:
     - 當 `plan` 分解完畢後，若有模糊項應具備詢問細節的能力。
     - **持久化記憶 (Persistent Memory)**: 思考如何跨越 Task Lifecycle 將這些細節答案存入 `Framework.md` 或獨立的 `context.json` 中。
-2. **`send_message` 重複出現問題 (Duplicate Output Loop)**:
+3. **`send_message` 重複出現問題 (Duplicate Output Loop)**:
     - AI 推論時似乎會重複產生文字片段或重複呼叫 `send_message` 任務。
     - 需檢查 `ai_request` 的解析邏輯與 `generateContentStream` 的 chunk 捕捉方式，確保不會對同一段文字重複派發任務。
 
@@ -56,6 +58,4 @@ worker 可以用文字的方式設定技能
    - **現象**: Agent 在 Round 5 正確呼叫 `ask_user`，但在 Round 6 卻立刻表示：「使用者還沒回覆，我直接假設...」並強行推進。
    - **影響**: 使 `ask_user` 安全機制形同虛設。在自動化流程中，未經回傳訊號就自行下假設，可能導致非預期的破壞性改動。
 
-5. **日誌與狀態追蹤時序脫節 (Log Chronology)**
-   - **現象**: Worker 的詳細執行日誌早於啟動它的 Coordinator 日誌出現（例如 Worker 見於開頭，Coordinator 見於 Line 1028）。
-   - **原因**: 顯示非同步寫入或併行紀錄時缺乏全域排序機制，這使得回溯「任務因果關係」變得困難。
+    - **原因**: 顯示非同步寫入或併行紀錄時缺乏全域排序機制，這使得回溯「任務因果關係」變得困難。

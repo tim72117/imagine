@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "server": "nodemon server/server.js",
+    "server": "nodemon --ignore server/history/ --ignore server/fixtures/ server/server.js",
     "test": "vitest run"
   },
   "dependencies": {

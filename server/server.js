@@ -7,7 +7,6 @@ import { WebSocketServer } from 'ws';
 import { fileURLToPath } from 'url';
 import {
   toolbox,
-  TARGET_FILE,
   Coordinator
 } from './ai.js';
 
@@ -17,6 +16,9 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+
+// --- 集中定義工作空間 (由 server.js 主導) ---
+export const TARGET_DIR = path.join(__dirname, '../src/sandbox');
 
 // --- WebSocket 全域追蹤與發送工具 ---
 const activeClients = new Set();
@@ -31,15 +33,18 @@ const broadcast = (data) => {
 // --- 註冊 工具鉤子 (Hooks) ---
 // 註解：現在我們直接使用 broadcast，不再依賴 context.onChunk
 
-toolbox.on('update_file', 'before', async ({ args }) => {
+toolbox.on('update_file', 'before', async ({ args, context }) => {
+  broadcast({ statusMessage: `📝 正在更新檔案: ${args.path}...` });
+
+  // UI 專屬邏輯：若目標為特定檔案，則啟動渲染載入與延遲
   if (args.code) {
-    broadcast({ type: 'rendering', isLoading: true });
-
-    console.log(`[Test] 偵測到代碼變更，進入 3 秒測試延遲...`);
-    await new Promise(resolve => setTimeout(resolve, 3000));
-
-    console.log(`[Hook:before] 正在寫入檔案代碼至 ${TARGET_FILE}...`);
-    await fs.writeFile(TARGET_FILE, args.code, 'utf8');
+    const fileName = path.basename(args.path || '');
+    if (fileName === 'Target.tsx') {
+      broadcast({ type: 'rendering', isLoading: true });
+      broadcast({ statusMessage: `🎨 正在渲染新的 UI 畫面...` });
+      console.log(`[Test] 偵測到 Target.tsx 變更，進入 3 秒測試延遲...`);
+      await new Promise(resolve => setTimeout(resolve, 3000));
+    }
   }
 });
 
@@ -69,9 +74,14 @@ toolbox.on('plan', 'after', async ({ args }) => {
 });
 
 toolbox.on('update_file', 'after', async ({ args }) => {
-  broadcast({ type: 'rendering', isLoading: false });
-  broadcast({ type: 'refresh' }); // 觸發前端刷新 Sandbox
-  broadcast({ statusMessage: `✨ 代碼實作完成: ${args.explanation}` });
+  broadcast({ statusMessage: `✅ 檔案更新完成: ${args.path}` });
+
+  // UI 專屬邏輯：結束渲染狀態並重新整理
+  if (args.path && args.path.includes('Target.tsx')) {
+    broadcast({ type: 'rendering', isLoading: false });
+    broadcast({ type: 'refresh' });
+    broadcast({ statusMessage: `✨ UI 渲染完成` });
+  }
 });
 
 
@@ -96,7 +106,10 @@ app.use(express.json());
 
 
 app.get('/api/get-ui-code', async (req, res) => {
-  const code = await fs.readFile(TARGET_FILE, 'utf8');
+  const target = req.query.path || 'Target.tsx';
+  const filePath = path.join(TARGET_DIR, target);
+  if (!(await fs.pathExists(filePath))) return res.status(404).json({ success: false });
+  const code = await fs.readFile(filePath, 'utf8');
   res.json({ success: true, code });
 });
 
@@ -132,7 +145,7 @@ wss.on('connection', (ws) => {
         await coordinator.coordinate(prompt, {
           getIsAborted: () => isAborted,
           loopCount: 0,
-          workDir: path.join(__dirname, '../src/sandbox') // 強制沙盒區域
+          workDir: TARGET_DIR // 強制工作區域
         });
       } finally {
         isProcessBusy = false;

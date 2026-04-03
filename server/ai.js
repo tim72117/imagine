@@ -9,9 +9,9 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// 路徑定義
-export const TARGET_FILE = path.join(__dirname, '../src/sandbox/Target.tsx');
+// 路徑定義 (僅限系統日誌，工作樣本路徑由 context 傳入)
 export const HISTORY_DIR = path.join(__dirname, 'history');
+export const FIXTURES_DIR = path.join(__dirname, 'fixtures');
 
 // --- 信號機制 (Signal Mechanism) ---
 // 用於管理協調者與執行者之間的非同步喚醒與解鎖
@@ -75,7 +75,7 @@ const ALL_TOOL_DECLARATIONS = {
         parameters: {
             type: "OBJECT",
             properties: {
-                path: { type: "STRING", description: "目標檔案路徑或代碼（例：[F1]，預設為 Target.tsx）" },
+                path: { type: "STRING", description: "目標檔案路徑或代碼（例：[F1]）。" },
                 code: {
                     type: "STRING",
                     description: "完整的 React 組件代碼。規範：\n1. 絕對禁止 import。\n2. 僅限一個名為 App 的組件。\n3. 無須 export。\n4. 僅限 React 18 語法與 Tailwind CSS。\n5. 不支援第三方圖示，請用 Emoji 或 Tailwind 組件圖形。"
@@ -83,7 +83,7 @@ const ALL_TOOL_DECLARATIONS = {
                 explanation: { type: "STRING", description: "【極簡】說明本次代碼變更的核心邏輯與修改點。" },
                 next_step: { type: "STRING", description: "檔案更新完成後，預計的後續開發動作。" }
             },
-            required: ["code", "explanation", "next_step"]
+            required: ["path", "code", "explanation", "next_step"]
         }
     },
     "plan": {
@@ -126,14 +126,21 @@ const ALL_TOOL_DECLARATIONS = {
     },
     "spawn_workers": {
         name: "spawn_workers",
-        description: "由協調者調派一或多個「執行者（Workers）」來並行處理子任務。適合用於將大計畫拆解後同時執行多個獨立環節。",
+        description: "由協調者調派一或多個專屬執行者來處理子任務。你必須根據任務性質選擇「偵查者 (explorer)」或「編修者 (editor)」。",
         parameters: {
             type: "OBJECT",
             properties: {
                 tasks: {
                     type: "ARRAY",
-                    items: { type: "STRING" },
-                    description: "要指派給各執行者的具體工作目標列表（繁體中文）。列表中的每項任務都會啟動一個獨立的執行器。"
+                    items: {
+                        type: "OBJECT",
+                        properties: {
+                            goal: { type: "STRING", description: "指派給該執行者的具體工作目標（繁體中文）。" },
+                            role: { type: "STRING", enum: ["explorer", "editor"], description: "指派的執行者角色類型。" }
+                        },
+                        required: ["goal", "role"]
+                    },
+                    description: "任務列表。每項任務都會啟動一個獨立的執行器。"
                 },
                 explanation: { type: "STRING", description: "說明為何需要此時調派這些執行者，以及它們分工的邏輯。" }
             },
@@ -144,7 +151,8 @@ const ALL_TOOL_DECLARATIONS = {
 
 // --- 工具清單指派 (Role Tool Assignments) ---
 const COORDINATOR_TOOL_NAMES = ["spawn_workers"];
-const AGENT_TOOL_NAMES = ["list_files", "read_file_content", "update_file", "send_message", "ask_user"];
+const EXPLORER_TOOL_NAMES = ["list_files", "read_file_content"];
+const EDITOR_TOOL_NAMES = ["read_file_content", "update_file"];
 
 // 助手函式：根據名稱列表產出 Gemini 所需的 tools 格式
 function getTools(names) {
@@ -152,39 +160,52 @@ function getTools(names) {
     return [{ functionDeclarations: declarations }];
 }
 
-// --- 自動生成工具清單指令的輔助函式 ---
-function getToolDescriptionPrompt(target = 'agent') {
-    const names = (target === 'coordinator' ? COORDINATOR_TOOL_NAMES : AGENT_TOOL_NAMES);
+// 助手函式：根據名稱列表產出 Gemini 所需的 tools 格式
+function getToolDescriptionPrompt(role = 'agent') {
+    let names = [];
+    if (role === 'coordinator') names = COORDINATOR_TOOL_NAMES;
+    else if (role === 'explorer') names = EXPLORER_TOOL_NAMES;
+    else if (role === 'editor') names = EDITOR_TOOL_NAMES;
+
     const list = names.map(n => `- **${n}**: ${ALL_TOOL_DECLARATIONS[n].description}`).join('\n');
     return `【可用工具清單 (Toolkits)】：\n${list}\n\n請根據需求選擇最適合的工具組合。`;
 }
 
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
 export const coordinatorModel = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite", tools: getTools(COORDINATOR_TOOL_NAMES) });
-export const agentModel = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite", tools: getTools(AGENT_TOOL_NAMES) });
+export const explorerModel = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite", tools: getTools(EXPLORER_TOOL_NAMES) });
+export const editorModel = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite", tools: getTools(EDITOR_TOOL_NAMES) });
 
 // --- 系統提示詞範本 (Prompts) ---
-const COORDINATOR_SYSTEM_PROMPT = `你是一個強大的【任務協調者 (Coordinator)】。你的職責是根據使用者需求制定全局策略，並「調派專屬執行者 (Spawn Workers)」來落實任務。
+const COORDINATOR_SYSTEM_PROMPT = `你是一個強大的【協調者 (Coordinator)】。你的職責是制定策略，並透過「調派 (Spawn Workers)」落實任務。
+
+【執行者角色】：
+1. **偵查者 (Explorer)**: 探索目錄、讀取檔案、報告分析結果。結構不明時優先調派。
+2. **編修者 (Editor)**: 根據已知結構與需求，編修代碼。
 
 【執行準則】：
-1. **分析與目標定義**: 深入理解需求，將其轉化為一個或多個具備明確技術細節的【執行目標 (Goal)】。
-2. **指揮與分派**: 你本身不進行任何具體的開發或檔案操作。你必須呼叫 \`spawn_workers\` 工具並指派不同的任務目標給開發者（Worker）。
-3. **策略優先**: 如果目前對專案結構一無所知，請優先指派一個分析型的 Worker 進行偵查。
-4. **結束訊號**: 當所有 Worker 任務交辦完畢後，請產出目標總結（繁體中文）。
+1. **探訪優先**: 接收指令後，應先「調派」偵查者去理解專案架構，掌握檔案現況。
+2. **行動導向**: 首輪回應應包含工具調派，避免僅輸出規劃文字。
+3. **理解後詢問**: 在進行初步探訪後，若需求仍無法理解或執行細節不足，方可尋求使用者協助。
+4. **指揮分派**: 你不進行開發或檔案操作。必須呼叫 \`spawn_workers\` 指派任務。
+5. **結束訊號**: Worker 任務結束後，產出總結（繁體中文）。
 `;
 
-const WORKER_SYSTEM_PROMPT = `你是一個具備「思考與執行合一」能力的高級前端工程師 Worker。
-注意：【禁止憑空推論】。如果你的上下文不足以支撐對現有專案實作的精確理解，【必須】立刻呼叫工具進行主動偵查。
+const EXPLORER_SYSTEM_PROMPT = `你是一個【偵查者 (Explorer)】。你的主要職責是探索現有的程式碼庫，掌握專案結構，以便為後續的編修提供情報。
+你的任務目標是釐清檔案位置、分析組件關係或確認實作細節。
 
-【專案執行原則】：
-1. **分析先行**: 接收到需求後，若未掌握具體檔案結構或編碼細節，或是需求本身過於空泛抽象，請優先使用偵查類工具或 \`plan\` 工具。
-2. **透明度**: 所有說明與分析流程請一律使用【繁體中文】。
+【執行準則】：
+- 使用 \`list_files\` 與 \`read_file_content\` 來偵察專案。
+- 嚴禁憑空推論，所有結論必須基於讀取到的檔案內容。
+- 完成偵查後，請直接在對話中詳述你的發現與分析結果。
+`;
 
-【執行流程 (SOP)】：
-1. **探索與釐理階段 (Discovery & Clarify)**: 調用偵查工具與 \`list_files\` 獲取現況。
-2. **決議與規劃階段 (Reasoning & Plan)**: 使用 \`plan\` 工具梳理多階段開發步驟。
-3. **執行階段 (Implementation)**: 呼叫 \`update_file\` 套用代碼變動。
-4. **回報階段 (Reporting)**: 完成所有變動後，【必須】呼叫 \`send_message\` 提供彙報並結束連鎖。
+const EDITOR_SYSTEM_PROMPT = `你是一個【編修者 (Editor)】。你的主要職責是根據明確的需求與檔案路徑，進行具體的代碼實作或修正。
+
+【執行準則】：
+- 在修改前，請確保你已經掌握了目標檔案的相關上下文（如路徑與內容）。
+- 使用 \`update_file\` 進行代碼變更。
+- 變更完成後，請直接在對話中回報你的實作重點。
 `;
 
 // --- 代理人配置定義 (Role Configs) ---
@@ -196,45 +217,64 @@ const ROLES = {
         allowedTools: COORDINATOR_TOOL_NAMES,
         type: 'coordinator'
     },
-    worker: {
-        name: "Worker",
-        model: agentModel,
-        systemPrompt: WORKER_SYSTEM_PROMPT,
-        allowedTools: AGENT_TOOL_NAMES,
-        type: 'worker'
+    explorer: {
+        name: "Explorer",
+        model: explorerModel,
+        systemPrompt: EXPLORER_SYSTEM_PROMPT,
+        allowedTools: EXPLORER_TOOL_NAMES,
+        type: 'explorer'
+    },
+    editor: {
+        name: "Editor",
+        model: editorModel,
+        systemPrompt: EDITOR_SYSTEM_PROMPT,
+        allowedTools: EDITOR_TOOL_NAMES,
+        type: 'editor'
     }
 };
 
-// 紀錄回應資訊的函式
-export async function recordGeminiResponse({ type = "CHAT", prompt, output, data = null }) {
-    try {
-        await fs.ensureDir(HISTORY_DIR);
-        const now = new Date();
-        const dateStr = now.toISOString().split('T')[0];
-        const hourStr = now.getHours().toString().padStart(2, '0');
+// 簡單的日誌寫入鎖定隊列
+const logQueue = [];
+let isProcessingQueue = false;
 
-        let fileName = `log_${dateStr}_${hourStr}.json`;
-        if (data?.session_id) {
-            fileName = `log_${data.session_id}.json`;
-        }
-        const historyPath = path.join(HISTORY_DIR, fileName);
+async function processLogQueue() {
+    if (isProcessingQueue || logQueue.length === 0) return;
+    isProcessingQueue = true;
+    while (logQueue.length > 0) {
+        const { type, prompt, output, data, now } = logQueue.shift();
+        try {
+            const dateStr = now.toISOString().split('T')[0];
+            const hourStr = now.getHours().toString().padStart(2, '0');
+            let fileName = `log_${dateStr}_${hourStr}.json`;
+            if (data?.session_id) fileName = `log_${data.session_id}.json`;
+            const historyPath = path.join(HISTORY_DIR, fileName);
 
-        let logs = [];
-        if (await fs.pathExists(historyPath)) {
-            try { logs = await fs.readJson(historyPath); } catch (e) { logs = []; }
-        }
-
-        logs.push({
-            timestamp: now.toLocaleString(),
-            type,
-            prompt,
-            output,
-            data
-        });
-        await fs.writeJson(historyPath, logs, { spaces: 2 });
-    } catch (error) {
-        console.error('[Error] 紀錄失敗:', error);
+            let logs = [];
+            if (await fs.pathExists(historyPath)) {
+                try { logs = await fs.readJson(historyPath); } catch (e) { logs = []; }
+            }
+            logs.push({ timestamp: now.toLocaleString(), type, prompt, output, data });
+            await fs.writeJson(historyPath, logs, { spaces: 2 });
+        } catch (e) { console.error('[Log Error]', e); }
     }
+    isProcessingQueue = false;
+}
+
+export async function recordGeminiResponse({ type = "CHAT", prompt, output, data = null }) {
+    const now = new Date();
+    // RAW 類型僅同步寫入 fixture
+    if (type === "RAW_REQUEST") {
+        if (data?.session_id) {
+            try {
+                await fs.ensureDir(FIXTURES_DIR);
+                const fixturePath = path.join(FIXTURES_DIR, `fixture_${data.session_id}_${data.round}.json`);
+                await fs.writeJson(fixturePath, { prompt, response: output }, { spaces: 2 });
+            } catch (e) { }
+        }
+        return; // 從歷史日誌中排除
+    }
+    logQueue.push({ type, prompt, output, data, now });
+    processLogQueue();
 }
 
 class Toolbox {
@@ -282,6 +322,12 @@ class Toolbox {
 
         const result = await handler(args, context);
 
+        if (result.success) {
+            console.log(`  [Tool] ✅ 執行成功: ${name}`);
+        } else {
+            console.log(`  [Tool] ❌ 執行失敗: ${name} (原因: ${result.error})`);
+        }
+
         await recordGeminiResponse({
             type: "TOOL_RESULT",
             prompt: `【工具完成】：${name}`,
@@ -300,21 +346,23 @@ export const toolbox = new Toolbox();
 const resolveSafePath = (base, inputPath, context = {}) => {
     if (!inputPath || inputPath === '.' || inputPath === './') return base;
 
-    // 1. 優先匹配檔案代號 (File Key)，例如 [F1] 或 F1
+    // 1. 優先提取並匹配工作階段中的檔案代號 (File Key)，例如 [F1], F1 或 [F1] Target.tsx
     const fileMap = context.session?.file_map || {};
-    const cleanKey = inputPath.replace(/[\[\]]/g, ''); // 支援 [F1] 或 F1
-    if (fileMap[cleanKey]) {
-        console.log(`  [Resolve] 🚀 使用檔案代碼轉義: ${inputPath} -> ${fileMap[cleanKey]}`);
-        return fileMap[cleanKey];
+    const keyMatch = inputPath.match(/F\d+/);
+    const key = keyMatch ? keyMatch[0] : null;
+
+    if (key && fileMap[key]) {
+        console.log(`  [Resolve] 🚀 檔案代碼轉義: ${inputPath} -> ${fileMap[key]}`);
+        return fileMap[key];
     }
 
     if (path.isAbsolute(inputPath)) return inputPath;
 
-    const normalizedInput = inputPath.replace(/\\/g, '/');
     const root = path.join(__dirname, '../');
     const relativeBase = path.relative(root, base).replace(/\\/g, '/');
+    const normalizedInput = inputPath.replace(/\\/g, '/');
 
-    // 如果輸入路徑包含了當前工作的相對起點，則進行剪裁
+    // 若輸入已包含相對路徑起點，進行處理
     if (relativeBase && normalizedInput.startsWith(relativeBase)) {
         const cleanedPath = normalizedInput.slice(relativeBase.length).replace(/^\/+/, '');
         return path.join(base, cleanedPath || '.');
@@ -326,7 +374,8 @@ const resolveSafePath = (base, inputPath, context = {}) => {
 // 註冊工具
 toolbox.register("list_files", async (args, context) => {
     try {
-        const base = context.workDir || path.join(__dirname, '../');
+        const base = context.workDir;
+        if (!base) return { success: false, error: "未指定工作目錄 (workDir)" };
         const absPath = resolveSafePath(base, args.path, context);
         const files = await fs.readdir(absPath);
 
@@ -360,7 +409,8 @@ toolbox.register("list_files", async (args, context) => {
 
 toolbox.register("read_file_content", async (args, context) => {
     try {
-        const base = context.workDir || path.join(__dirname, '../');
+        const base = context.workDir;
+        if (!base) return { success: false, error: "未指定工作目錄 (workDir)" };
         const absPath = resolveSafePath(base, args.path, context);
         const content = await fs.readFile(absPath, 'utf8');
         return { success: true, path: args.path, content };
@@ -374,12 +424,17 @@ toolbox.register("plan", async (args) => {
 
 toolbox.register("update_file", async (args, context) => {
     try {
-        const base = context.workDir || path.join(__dirname, '../src/sandbox');
-        // 優先使用 AI 指定的路徑，若無則預設 Target.tsx
-        const inputPath = args.path || 'Target.tsx';
-        const targetPath = resolveSafePath(base, inputPath, context);
+        const base = context.workDir;
+        if (!base) return { success: false, error: "未指定工作目錄 (workDir)" };
+        if (!args.path) {
+            return { success: false, error: "未指定目標檔案路徑" };
+        }
+        const targetPath = resolveSafePath(base, args.path, context);
 
-        await fs.ensureDir(path.dirname(targetPath));
+        if (!(await fs.pathExists(targetPath))) {
+            return { success: false, error: "無檔案" };
+        }
+
         await fs.writeFile(targetPath, args.code);
         return { success: true, path: targetPath, explanation: args.explanation };
     } catch (err) { return { success: false, error: err.message }; }
@@ -393,10 +448,16 @@ toolbox.register("spawn_workers", async (args, context) => {
     console.log(`  [Dispatcher] 🚀 啟動 ${taskCount} 個並行 Worker...`);
 
     // 背景執行所有 Worker 任務
-    const workerPromises = args.tasks.map(async (goal, index) => {
-        const worker = new Agent(ROLES.worker, toolbox);
-        console.log(`  [Dispatcher]   -> Worker #${index + 1} 啟動："${goal.substring(0, 30)}..."`);
-        return await worker.run(goal, context);
+    const workerPromises = args.tasks.map(async (task, index) => {
+        try {
+            const roleConfig = ROLES[task.role] || ROLES.explorer;
+            const worker = new Agent(roleConfig, toolbox);
+            console.log(`  [Dispatcher]   -> ${roleConfig.name} #${index + 1} 啟動："${task.goal.substring(0, 30)}..."`);
+            return await worker.run(task.goal, context);
+        } catch (err) {
+            console.error(`  [Dispatcher] ❌ Worker 執行崩潰:`, err);
+            return { role: task.role, status: "error", error: err.message };
+        }
     });
 
     // 訊號機制：當背景工人全數完成時，喚醒父代理人
@@ -414,6 +475,10 @@ toolbox.register("spawn_workers", async (args, context) => {
 });
 
 // --- 獨立 AI 推論引擎 (AIEngine) ---
+/**
+ * TODO: 將 AIEngine 實作改為全域單一佇列請求方式。
+ * 需支援：設定一次可並發請求數、每秒請求數 (Rate Limiting)。
+ */
 export class AIEngine {
     constructor(inferenceModel) { this.model = inferenceModel; }
     /**
@@ -431,17 +496,24 @@ export class AIEngine {
     /**
      * 非同步產生器：即時傳回工具呼叫，最後傳回完整結果
      */
-    async *generateStream(inputPrompt, { getIsAborted } = {}) {
+    async *generateStream(inputPrompt, context = {}) {
+        const { getIsAborted, sessionId, round } = context;
+
         const streamResponse = await this.model.generateContentStream({
             contents: [{ role: "user", parts: [{ text: inputPrompt }] }]
         });
+
         const allActions = [];
+        const rawChunks = []; // 用於紀錄原始反應
         let accumulatedText = "";
 
         for await (const chunk of streamResponse.stream) {
             if (getIsAborted?.()) break;
             const candidate = chunk.candidates?.[0];
             if (!candidate?.content?.parts) continue;
+
+            // 紀錄原始 Parts 用於回放測試
+            rawChunks.push(...candidate.content.parts);
 
             for (const part of candidate.content.parts) {
                 if (part.text) accumulatedText += part.text;
@@ -452,6 +524,17 @@ export class AIEngine {
                 }
             }
         }
+
+        // --- 紀錄到 Fixtures ---
+        if (sessionId) {
+            await recordGeminiResponse({
+                type: "RAW_REQUEST",
+                prompt: inputPrompt,
+                output: rawChunks,
+                data: { session_id: sessionId, round }
+            });
+        }
+
         yield { type: 'final', text: accumulatedText, actions: allActions };
     }
 }
@@ -462,7 +545,7 @@ export class Agent {
         this.roleName = config.name;
         this.model = config.model;
         this.systemPrompt = config.systemPrompt;
-        this.toolType = config.type === 'coordinator' ? 'coordinator' : 'agent';
+        this.toolType = config.type;
         this.toolbox = taskRegistry;
     }
 
@@ -490,8 +573,11 @@ export class Agent {
                 data: { id: stepId, role: this.roleName, round, session_id: context.sessionId }
             });
 
+            // 思考前的人為延遲
+            await new Promise(resolve => setTimeout(resolve, 1000));
+
             // 1. 執行推論與工具執行
-            const stream = engine.generateStream(completeInstruction);
+            const stream = engine.generateStream(completeInstruction, { ...context, round });
             let aiResponse = null;
             let toolResults = [];
             let pendingSleep = false;
@@ -522,14 +608,26 @@ export class Agent {
                 data: { id: stepId, role: this.roleName, session_id: context.sessionId }
             });
 
-            // 3. 更新狀態與終止判定
-            currentStatus += `\n[Round ${round} 分析]：${aiResponse.text}\n[Round ${round} 工具反饋]：${JSON.stringify(toolResults)}`;
+            if (!aiResponse) {
+                console.error(`  [${this.roleName}] ❌ 無法獲取 AI 回應。`);
+                break;
+            }
 
-            // 終止條件：呼叫了結束類工具 (send_message/ask_user) 或是在協調模式下給出了純文字總結
+            console.log(`  [${this.roleName}] 💭 分析：${aiResponse.text.substring(0, 150).replace(/\n/g, ' ')}${aiResponse.text.length > 150 ? '...' : ''}`);
+
+            // 3. 更新狀態與終止判定 (限制反饋長度防止 Token 爆炸)
+            const summaryResults = toolResults.map(r => {
+                let outputStr = JSON.stringify(r.output);
+                if (outputStr.length > 2000) outputStr = outputStr.substring(0, 2000) + "...(內容過長已截斷)";
+                return { name: r.name, output: outputStr };
+            });
+            currentStatus += `\n[Round ${round} 分析]：${aiResponse.text}\n[Round ${round} 工具反饋]：${JSON.stringify(summaryResults)}`;
+
+            // 終止條件：呼叫了結束類工具 (send_message/ask_user) 或是在無工具時給出了純文字總結
             const hasStopTool = aiResponse.actions.some(a => ['send_message', 'ask_user'].includes(a.name));
-            const isCoordinatorDone = this.toolType === 'coordinator' && aiResponse.actions.length === 0 && aiResponse.text.length > 0;
+            const isDoneWithoutTools = aiResponse.actions.length === 0 && aiResponse.text.length > 0;
 
-            if (hasStopTool || isCoordinatorDone) {
+            if (hasStopTool || isDoneWithoutTools) {
                 console.log(`  [${this.roleName}] ✨ 任務結束。`);
                 break;
             }
@@ -552,11 +650,11 @@ export class Coordinator {
         const master = new Agent(ROLES.coordinator, this.toolbox);
         const result = await master.run(userPrompt, context);
 
-        // 如果第一輪什麼都沒做，且沒呼叫工具，則啟動一個預設 Worker (退避補償)
+        // 如果第一輪什麼都沒做，且沒呼叫工具，則啟動一個預設 Explorer (退避補償)
         if (result.status === "complete" && !result.final_text.includes('workers_spawned')) {
-            console.log(`  [Master] ℹ️ 偵測到未自動分派，啟動手動補償 Worker...`);
-            const worker = new Agent(ROLES.worker, this.toolbox);
-            await worker.run(userPrompt, context);
+            console.log(`  [Master] ℹ️ 偵測到未自動分派，啟動手動補償 Explorer...`);
+            const explorer = new Agent(ROLES.explorer, this.toolbox);
+            await explorer.run(userPrompt, context);
         }
 
         return { success: true, sessionId };
