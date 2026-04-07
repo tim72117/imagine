@@ -4,7 +4,7 @@ import { fileURLToPath } from 'url';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import dotenv from 'dotenv';
 import { EventEmitter } from 'events';
-import { Agent, Signaler } from './agent.js';
+import { Agent, Signaler, AgentContext } from './agent.js';
 
 dotenv.config();
 
@@ -210,77 +210,26 @@ class WorkflowStore extends EventEmitter {
     getOrCreateSession(sessionId) {
         if (!this.sessions.has(sessionId)) {
             this.sessions.set(sessionId, {
-                events: [],
-                nodes: new Map(),
-                state: new Map() // 新增類型於 Redux 的全局狀態
+                tasks: new Map(),
+                state: new Map()
             });
         }
         return this.sessions.get(sessionId);
     }
 
-    async log(type, { prompt, output, data }) {
-        const sessionId = data?.session_id || 'default';
-        const session = this.getOrCreateSession(sessionId);
-        const now = new Date();
-        const logItem = { type, prompt, output, data, now };
-
-        session.events.push(logItem);
-
-        // --- 1. 原始日誌推送完成 ---
-        // (不再主動拼接 history 字串，改由讀取時動態解析)
-
-        // --- 2. 實時維護節點狀態 (Node State Management) ---
-        const role = data?.role || "System";
-        const round = data?.round || 1;
-        const agent_id = data?.agent_id;
-        const nodeId = agent_id || `${sessionId}_${role}_${round}`;
-
-        if (!session.nodes.has(nodeId)) {
-            session.nodes.set(nodeId, {
-                id: nodeId,
-                role,
-                round,
-                steps: [],
-                status: 'active'
-            });
-        }
-        const node = session.nodes.get(nodeId);
-        node.round = round;
-        node.steps.push(logItem);
-
-        // 狀態機變遷
-        if (type === 'THINK_RESULT' || type === 'TOOL_RESULT' || type === 'AGENT_END') {
-            node.status = 'done';
-        } else if (type === 'DEBUG_PAUSE') {
-            node.status = 'paused';
-        } else {
-            node.status = 'active';
-        }
-
-        // --- 3. 發布更新 (透過 Redux-like setState) ---
-        // 發送給日誌紀錄器（基礎層）
-        this.emit('update', logItem);
-        // 發送給 UI 與其它 Agent (狀態層)
-        this.setState(sessionId, 'workflow_nodes', Array.from(session.nodes.values()));
-    }
+    // --- Redux-like State Management ---
 
     getInferenceHistory(sessionId) {
         const session = this.sessions.get(sessionId);
-        if (!session) return "";
+        if (!session || !session.tasks) return "";
 
-        // 從原始日誌中動態提取推論歷史文字，不增加多餘裝飾
-        return session.events
-            .filter(e => e.type === "THINK_RESULT" || e.type === "TOOL_RESULT")
-            .map(e => {
-                const roundText = e.data?.round ? `[R${e.data.round}] ` : "";
-                if (e.type === "THINK_RESULT") {
-                    return `${roundText}${e.output?.text || ""}`;
-                } else if (e.type === "TOOL_RESULT") {
-                    const out = typeof e.output === 'string' ? e.output : JSON.stringify(e.output);
-                    return `${roundText}Tool Result: ${out.substring(0, 500)}${out.length > 500 ? "..." : ""}`;
-                }
-                return "";
-            })
+        // 從該 Session 的所有 Tasks 中彙整推論歷史 (按時間排序)
+        const allEvents = Array.from(session.tasks.values())
+            .flatMap(t => t.history || [])
+            .sort((a, b) => a.time - b.time);
+
+        return allEvents
+            .map(e => e.text)
             .join("\n\n");
     }
 
@@ -297,6 +246,58 @@ class WorkflowStore extends EventEmitter {
         const session = this.sessions.get(sessionId);
         if (!session) return undefined;
         return session.state.get(key);
+    }
+
+    // --- Task Lifecycle Management ---
+    createTask(sessionId, { goal, role, agentId }) {
+        const session = this.getOrCreateSession(sessionId);
+        if (!session.tasks) session.tasks = new Map();
+        
+        const taskId = `TASK-${Date.now()}-${Math.random().toString(36).substring(2, 5).toUpperCase()}`;
+        const task = {
+            id: taskId,
+            agentId,
+            role,
+            goal,
+            status: 'pending',
+            progress: 0,
+            history: [],
+            createdAt: new Date()
+        };
+        session.tasks.set(taskId, task);
+        
+        this.emit('state_update', { sessionId, key: 'tasks', value: Array.from(session.tasks.values()) });
+        return taskId;
+    }
+
+    updateTask(sessionId, taskId, updates) {
+        const session = this.getOrCreateSession(sessionId);
+        if (!session.tasks || !session.tasks.get(taskId)) return;
+        
+        const task = session.tasks.get(taskId);
+        
+        // 僅進行狀態合併 (messages 現在會隨著 updates 同步進來)
+        Object.assign(task, updates, { updatedAt: new Date() });
+        
+        this.emit('state_update', { sessionId, key: 'tasks', value: Array.from(session.tasks.values()) });
+    }
+
+    getTask(sessionId, taskId) {
+        const session = this.sessions.get(sessionId);
+        if (!session || !session.tasks) return null;
+        return session.tasks.get(taskId) || null;
+    }
+
+    // 獲取 Session 下所有的全域狀態 (用於全局同步)
+    getSessionState(sessionId) {
+        const session = this.sessions.get(sessionId);
+        if (!session || !session.state) return {};
+        // 將 Map 轉為 Plain Object
+        const stateObj = {};
+        for (const [key, value] of session.state.entries()) {
+            stateObj[key] = value;
+        }
+        return stateObj;
     }
 }
 
@@ -342,12 +343,16 @@ class Toolbox {
 
         await this.runHooks(name, 'before', { toolName: name, args, context });
 
-        // 使用統一 Store 紀錄工具啟動
-        await context.store.log("TOOL_START", {
-            prompt: name,
-            output: args,
-            data: { id: stepId, name, args, session_id: context.sessionId, role: context.role, round: context.round, agent_id: context.agentId }
+        // 透過 messages 紀錄工具啟動 (取代 event)
+        context.messages.push({
+            role: 'system',
+            text: `🛠️ Tool execution started: ${name}`,
+            data: { name, args },
+            time: Date.now()
         });
+        
+        context.status = 'executing_tool';
+        context.updateStatus();
 
         const result = await handler(args, context);
 
@@ -356,13 +361,18 @@ class Toolbox {
         } else {
             console.log(`  [Tool] ❌ 執行失敗: ${name} (原因: ${result.error})`);
         }
-
-        // 使用統一 Store 紀錄工具結果
-        await context.store.log("TOOL_RESULT", {
-            prompt: name,
-            output: result,
-            data: { id: stepId, name, result, session_id: context.sessionId, role: context.role, round: context.round, agent_id: context.agentId }
+        
+        // 透過 messages 紀錄工具結果 (role: tool)
+        const toolText = result.success ? `Tool Output from ${name}: ${JSON.stringify(result).substring(0, 500)}` : `Error in ${name}: ${result.error}`;
+        context.messages.push({
+            role: 'tool',
+            text: toolText,
+            data: { name, result },
+            time: Date.now()
         });
+
+        context.status = result.success ? 'tool_completed' : 'tool_failed';
+        context.updateStatus();
 
         await this.runHooks(name, 'after', { toolName: name, args, result, context });
         return result;
@@ -481,10 +491,78 @@ toolbox.register("spawn_workers", async (args, context) => {
         try {
             const roleConfig = ROLES[task.role] || ROLES.explorer;
             const worker = new Agent(roleConfig, toolbox);
-            console.log(`  [Dispatcher]   -> ${roleConfig.name} #${index + 1} 啟動："${task.goal.substring(0, 30)}..."`);
-            const childContext = { ...context };
-            delete childContext.agentId; // 確保子代理人有自己的獨立 ID
-            return await worker.run(task.goal, childContext);
+            
+            // 1. 在全局 Store 建立 Task
+            const taskId = context.store.createTask(context.sessionId, {
+                goal: task.goal,
+                role: roleConfig.name
+            });
+
+            // 1.5 立即更新為啟動狀態並推入 system 訊息
+            context.store.updateTask(context.sessionId, taskId, {
+                status: 'pending',
+                progress: 0,
+                messages: [{
+                    role: 'system',
+                    text: `🚀 Agent [${roleConfig.name}] spawned to solve: ${task.goal}`,
+                    time: Date.now()
+                }]
+            });
+
+            console.log(`  [Dispatcher]   -> ${roleConfig.name} #${index + 1} 啟動 (Task: ${taskId})`);
+            
+            // 2. 建立具備高度封裝的 AgentContext (通用獨立結構)
+            const childContext = new AgentContext({
+                sessionId: context.sessionId,
+                taskId,
+                workDir: context.workDir,
+                signaler: context.signaler,
+                // 直接取用 Context 下下的 messages 進行文字拚接以作為推論歷史
+                getHistory: () => childContext.messages.map(m => m.text).join("\n\n"),
+                // 獲取與主動同步全域狀態的唯一入口 (合併了原有的 refresh 功能)
+                getState: async (key) => {
+                    if (!key) {
+                        // 無 Key 情境：執行全域同步 (任務 + 全域 Session)
+                        const latestTask = context.store.getTask(context.sessionId, taskId);
+                        if (latestTask) {
+                            childContext.status = latestTask.status;
+                            childContext.progress = latestTask.progress;
+                            childContext.messages = [...(latestTask.messages || [])];
+                        }
+                        const globalState = context.store.getSessionState(context.sessionId);
+                        Object.assign(childContext, globalState);
+                        return childContext;
+                    } else {
+                        // 有 Key 情境：同步特定全域變數並賦值回到實例上
+                        const val = context.store.getState(context.sessionId, key);
+                        childContext[key] = val;
+                        return val;
+                    }
+                }
+            });
+
+            // 複寫 Store 存取方法 (偵測實例狀態並自動組裝)
+            childContext.updateStatus = (updates) => context.store.updateTask(context.sessionId, taskId, {
+                status: childContext.status,
+                progress: childContext.progress,
+                round: childContext.round,
+                goal: childContext.goal,
+                messages: childContext.messages, // 同步訊息陣列到全域 Store
+                ...updates
+            });
+            
+            const it = worker.run(task.goal, childContext);
+            let result;
+            while (true) {
+                const { value, done } = await it.next();
+                if (done) {
+                    result = value;
+                    break;
+                }
+                // 在背景運行的 worker，訊息會透過 state_update 自動廣播，
+                // 但若需要亦可在此處理每一條 yielded message。
+            }
+            return result;
         } catch (err) {
             console.error(`  [Dispatcher] ❌ Worker 執行崩潰:`, err);
             return { role: task.role, status: "error", error: err.message };
@@ -512,7 +590,7 @@ export class Coordinator {
         this.toolbox = toolbox;
     }
 
-    async coordinate(userPrompt, executionContext = {}) {
+    async *coordinate(userPrompt, executionContext = {}) {
         const sessionId = executionContext.sessionId || `SESSION-${Date.now()}`;
         // 優先使用自定義訊號器，否則建立新的
         const context = {
@@ -523,15 +601,93 @@ export class Coordinator {
             agentId: executionContext.masterAgentId // 使用傳入的主代理人 ID
         };
 
-        // 啟動身為 Coordinator 角色的主代理人
+        // 1. 為主代理人 (Master/Coordinator) 建立任務
+        const taskId = context.store.createTask(sessionId, {
+            goal: userPrompt,
+            role: 'Coordinator',
+            agentId: context.agentId
+        });
+
+        // 1.5 指揮者啟動回報
+        context.store.updateTask(sessionId, taskId, {
+            status: 'pending',
+            progress: 0,
+            messages: [{
+                role: 'system',
+                text: `🎮 Coordinator started master mission: ${userPrompt}`,
+                time: Date.now()
+            }]
+        });
+
+        // 2. 啟動身為 Coordinator 角色的主代理人 (Master Context)
+        const masterContext = new AgentContext({
+            sessionId,
+            taskId,
+            agentId: context.agentId,
+            workDir: context.workDir,
+            signaler: context.signaler,
+            getHistory: function() { return this.messages.map(m => m.text).join("\n\n"); }
+        });
+
+        masterContext.updateStatus = function(updates) {
+            return context.store.updateTask(sessionId, taskId, {
+                status: this.status,
+                progress: this.progress,
+                round: this.round,
+                goal: this.goal,
+                messages: this.messages,
+                ...updates
+            });
+        };
+
+        masterContext.getState = function(key) {
+            if (!key) {
+                const latestTask = context.store.getTask(sessionId, taskId);
+                if (latestTask) {
+                    this.status = latestTask.status;
+                    this.progress = latestTask.progress;
+                    this.messages = [...(latestTask.messages || [])];
+                }
+                const globalState = context.store.getSessionState(sessionId);
+                Object.assign(this, globalState);
+                return this;
+            } else {
+                const val = context.store.getState(sessionId, key);
+                this[key] = val;
+                return val;
+            }
+        };
+
+        masterContext.setAppState = function(updates) {
+            Object.assign(this, updates);
+            return this.updateStatus();
+        };
+
         const master = new Agent(ROLES.coordinator, this.toolbox);
-        const result = await master.run(userPrompt, context);
+        
+        // 疊代產生器並 yield 訊息，最後捕捉 return 值
+        const it = master.run(userPrompt, masterContext);
+        let result;
+        while (true) {
+            const { value, done } = await it.next();
+            if (done) {
+                result = value;
+                break;
+            }
+            yield value;
+        }
 
         // 如果第一輪什麼都沒做，且沒呼叫工具，則啟動一個預設 Explorer (退避補償)
-        if (result.status === "complete" && !result.final_text.includes('workers_spawned')) {
+        // 註：Explorer 此處若也改為 generator 則須比照處理，暫維持現狀或亦改為消耗 Iterator
+        if (result.status === "complete" && !context.store.getTask(sessionId, taskId).messages.some(m => m.data?.name === 'spawn_workers')) {
             console.log(`  [Master] ℹ️ 偵測到未自動分派，啟動手動補償 Explorer...`);
             const explorer = new Agent(ROLES.explorer, this.toolbox);
-            await explorer.run(userPrompt, context);
+            const expIt = explorer.run(userPrompt, context);
+            while (true) {
+                const { value, done } = await expIt.next();
+                if (done) break;
+                yield value;
+            }
         }
 
         return { success: true, sessionId };

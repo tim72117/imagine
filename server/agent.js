@@ -1,4 +1,4 @@
-// --- 訊號中心 (Signaler) ---
+// --- 訊號中心 (Signaler) 與 上下文定義 (Context) ---
 export class Signaler {
     constructor() {
         this.events = new Map();
@@ -14,6 +14,54 @@ export class Signaler {
     }
     wait(event) {
         return new Promise(resolve => this.on(event, resolve));
+    }
+}
+
+/**
+ * 通用獨立的 Agent 上下文結構 (AgentContext)
+ * 適用於不同場景在做複寫 (Override) 以存取全域 Store
+ */
+export class AgentContext {
+    constructor(initFields = {}) {
+        this.sessionId = initFields.sessionId || 'default';
+        this.agentId = initFields.agentId || `AGENT-${Math.random().toString(36).substring(2, 7).toUpperCase()}`;
+        this.taskId = initFields.taskId || null;
+        
+        // --- 核心狀態 (State) ---
+        this.status = initFields.status || 'pending';
+        this.progress = initFields.progress || 0;
+        this.round = initFields.round || 0;
+        this.goal = initFields.goal || '';
+        this.messages = initFields.messages || []; // 存放推論過程的訊息陣列
+
+        this.workDir = initFields.workDir || './';
+        this.signaler = initFields.signaler || new Signaler();
+
+        // 強制實作獲取全域 Store 方法 (預設拋錯以確保場景複寫)
+        // 強制實作獲取全域 Store 方法 (預設拋錯以確保場景複寫)
+        this.updateStatus = initFields.updateStatus || ((_updates) => { throw new Error("updateStatus not implemented in context."); });
+        this.getHistory = initFields.getHistory || (() => "");
+        this.getState = initFields.getState || (async (_key) => undefined); // 獲取/同步全域狀態的唯一入口
+        this.setAppState = initFields.setAppState || ((_updates) => { throw new Error("setAppState not implemented in context."); });
+    }
+
+    /**
+     * 組裝並產生一個全新的 Context 實例 (不可變性模式)
+     */
+    clone(overrides = {}) {
+        const newInstance = new AgentContext({
+            ...this,
+            ...overrides,
+            // 確保訊息陣列是深拷貝，避免參照污染
+            messages: [...(overrides.messages || (this.messages || []))]
+        });
+        
+        // 確保克隆後，方法內部抓取的依然是當前實例的閉包或指針 (如果是由外部注入)
+        newInstance.updateStatus = overrides.updateStatus || this.updateStatus;
+        newInstance.getHistory = overrides.getHistory || this.getHistory;
+        newInstance.getState = overrides.getState || this.getState;
+        
+        return newInstance;
     }
 }
 
@@ -142,90 +190,133 @@ export class Agent {
         this.toolbox = taskRegistry;
     }
 
-    async run(goal, context) {
-        const agentId = context.agentId || `AGENT-${Math.random().toString(36).substring(2, 7).toUpperCase()}`;
-        console.log(`  [${this.roleName}] (${agentId}) 🧠 開始任務：${goal.substring(0, 50)}...`);
-
-        if (!context.store) {
-            console.error("  [Agent] ❌ 遺失工作流 Store，無法紀錄狀態。");
-            return { error: 'missing_store' };
+    async *run(goal, context) {
+        // 確保 context 符合類別實體，若非實體則可能需要包裝
+        if (!(context instanceof AgentContext)) {
+            console.warn(`  [${this.roleName}] 🧱 警告：Context 非 AgentContext 實體，強制轉化。`);
         }
-
-        // 1. 紀錄 Agent 啟動
-        await context.store.log("AGENT_START", {
-            prompt: this.roleName,
-            data: { role: this.roleName, agent_id: agentId, goal, session_id: context.sessionId }
-        });
+        
+        // 1. 直接更新 Context 狀態，不再使用本地解構
+        context.goal = goal;
+        
+        console.log(`  [${this.roleName}] (${context.agentId}) 🧠 開始任務：${goal.substring(0, 50)}...`);
 
         if (!context.signaler) context.signaler = new Signaler();
 
+        // --- 0. 等待啟動訊號 (Wait for Start Signal) ---
+        while (true) {
+            await context.getState();
+            if (context.status !== 'pending') break;
+            console.log(`  [${this.roleName}] ⏳ 狀態為 pending，等待全域 Store 指令啟動...`);
+            await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+
         const engine = new AIEngine(this.model);
         const MAX_ROUNDS = context.loopCountLimit || 5;
-        let round = 0;
 
-        while (round < MAX_ROUNDS) {
-            round++;
-            console.log(`  [${this.roleName}] 🔄 第 ${round} 輪循環`);
+        while (context.round < MAX_ROUNDS) {
+            // 0. 在每一輪開始前，取得全域 Store 的最新狀態 (使用 getState 無參數進行全域同步)
+            await context.getState();
 
-            // 將當前狀態注入 context，供工具日誌使用
-            context.role = this.roleName;
-            context.round = round;
-            context.agentId = agentId;
+            // 1. 全解構快照 (Snapshot ALL used states + Methods)
+            let { round, status, progress, messages, goal, workDir, signaler, setAppState } = context;
+            
+            // 拷貝訊息陣列以供本地操作 (避免直接修改 context.messages 引用)
+            let localMessages = [...messages];
+            let currentRound = round + 1;
+
+            console.log(`  [${this.roleName}] 🔄 第 ${currentRound} 輪循環啟動`);
+
+            // --- 階段性提交：紀錄輪次啟動 ---
+            status = 'thinking';
+            progress = Math.min(10 + (currentRound * 15), 90);
+            const thinkingMsg = { role: 'system', text: `🧠 Thinking started (Round ${currentRound})...`, time: Date.now() };
+            localMessages.push(thinkingMsg);
+            yield thinkingMsg;
+            
+            // 使用 setAppState 一鍵同步回全域
+            setAppState({
+                round: currentRound,
+                status,
+                progress,
+                messages: localMessages
+            });
 
             const stepId = `STEP-${Date.now()}`;
-            const envInfo = `【目前工作目錄】：${context.workDir || "未定義"}`;
+            const envInfo = `【目前工作目錄】：${workDir || "未定義"}`;
             
-            // 從 Store 實時獲取本 Agent 或 Session 的推論歷史 (實現跨 Agent 共用)
-            const currentHistory = context.store.getInferenceHistory(context.sessionId);
+            // 從 Context 直接獲取推論歷史資訊
+            const currentHistory = context.getHistory ? context.getHistory() : "";
             const statusHistory = `【目標】：${goal}\n${currentHistory}`;
             const completeInstruction = `${this.systemPrompt}\n${getToolDescriptionPrompt(this.toolType)}\n${envInfo}\n${statusHistory}`;
 
-            // --- 精確除錯斷點：在正式請求 AI 之前停頓 ---
-            if (context.isDebugMode) {
-                console.log(`  [${this.roleName}] 🚧 準備執行 AI 推理...`);
-                await context.store.log("DEBUG_PAUSE", {
-                    prompt: `request_api_round_${round}`,
-                    data: { role: this.roleName, round, session_id: context.sessionId, agent_id: agentId }
-                });
-                await context.signaler.wait('debug_continue'); // 進入休眠，直到接到 debug_continue 訊號
-            }
-
-            await context.store.log("THINK_START", {
-                prompt: completeInstruction,
-                data: { id: stepId, role: this.roleName, round, session_id: context.sessionId, agent_id: agentId }
-            });
-
             await new Promise(resolve => setTimeout(resolve, 1000));
 
-            const stream = engine.generateStream(completeInstruction, { ...context, round });
+            // AI 推理階段
+            const stream = engine.generateStream(completeInstruction, { ...context });
             let aiResponse = null;
-            let toolResults = [];
             let pendingSleep = false;
 
             for await (const chunk of stream) {
                 if (chunk.type === 'action') {
+                    // --- 工具執行 ---
+                    status = 'executing_tool';
+                    setAppState({ status });
 
+                    // 工具內部會更新 context.messages
                     const res = await this.toolbox.execute_tool(chunk.action.name, chunk.action.args, context);
-                    toolResults.push({ name: chunk.action.name, output: res });
+                    
+                    // 從 context.messages 中抓取最新加入的工具相關訊息並 yield
+                    // 一般 execute_tool 會推入 2 條訊息：started 與 result
+                    const newMessages = context.messages.slice(localMessages.length);
+                    for (const msg of newMessages) {
+                        yield msg;
+                    }
 
-
+                    // 同步本地副本
+                    localMessages = [...context.messages];
+                    
                     if (res && res.status === "workers_spawned") pendingSleep = true;
                 } else if (chunk.type === 'final') {
                     aiResponse = chunk;
+                    if (aiResponse?.text) {
+                        const finalMsg = { role: 'assistant', text: aiResponse.text, time: Date.now() };
+                        localMessages.push(finalMsg);
+                        yield finalMsg;
+                    }
                 }
             }
 
             if (pendingSleep) {
                 console.log(`  [${this.roleName}] 💤 進入休眠期，等待訊號喚醒...`);
-                const subTasksResults = await context.signaler.wait('workers_done');
+                status = 'waiting';
+                const waitMsg = { role: 'system', text: `⏳ Waiting for sub-agents to complete tasks...`, time: Date.now() };
+                localMessages.push(waitMsg);
+                yield waitMsg;
+                
+                setAppState({
+                    status,
+                    messages: localMessages
+                });
+                
+                const subTasksResults = await signaler.wait('workers_done');
                 console.log(`  [${this.roleName}] 🔔 喚醒點：獲取成果，解鎖循環。`);
-                toolResults.push({ name: "sub_tasks_result", output: subTasksResults });
+                const resumeMsg = { role: 'tool', text: `Sub-agents results: ${JSON.stringify(subTasksResults).substring(0, 500)}`, tool: 'spawn_workers', time: Date.now() };
+                localMessages.push(resumeMsg);
+                yield resumeMsg;
             }
 
-            await context.store.log("THINK_RESULT", {
-                prompt: stepId,
-                output: aiResponse,
-                data: { id: stepId, role: this.roleName, round, session_id: context.sessionId, agent_id: agentId }
+            status = 'thinking_completed';
+            setAppState({
+                status: status,
+                messages: localMessages
+            });
+
+            // 3. 這一輪結束，重新組裝 Context 並賦值回變數，讓下一輪使用全新的實體 (情況二模式)
+            context = context.clone({
+                round: context.round,
+                status: context.status,
+                progress: context.progress
             });
 
             if (!aiResponse) {
@@ -252,12 +343,20 @@ export class Agent {
             }
         }
 
-        // 2. 紀錄 Agent 關閉
-        await context.store.log("AGENT_END", {
-            prompt: this.roleName,
-            data: { role: this.roleName, agent_id: agentId, session_id: context.sessionId }
+        // --- 已完成 ---
+        status = 'completed';
+        progress = 100;
+        const completeMsg = { role: 'system', text: `✅ Task goal achieved. Finalizing.`, time: Date.now() };
+        localMessages.push(completeMsg);
+        yield completeMsg;
+
+        // 最後組裝回報
+        setAppState({
+            status,
+            progress,
+            messages: localMessages
         });
 
-        return { role: this.roleName, agent_id: agentId, status: "complete", final_text: statusHistory };
+        return { role: this.roleName, agent_id: context.agentId, status: "complete" };
     }
 }

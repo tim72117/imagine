@@ -192,23 +192,11 @@ wss.on('connection', (ws) => {
     try {
       const data = JSON.parse(rawMessage.toString());
       console.log(`[WS:Route] 類型: ${data.type || 'DEFAULT'}, Session: ${data.sessionId || sessionId}`);
-      if (data.type === 'DEBUG_CONTINUE') {
-        const idToUnlock = data.sessionId || sessionId;
-        const targetSignaler = sessionSignalers.get(idToUnlock);
-        if (targetSignaler) {
-            console.log(`[Debug] 解鎖指令已送達 Session: ${idToUnlock}`);
-            targetSignaler.emit('debug_continue', { success: true });
-        } else {
-            console.warn(`[Debug] 找不到對應的啟動中 Signaler: ${idToUnlock}`);
-        }
-        return;
-      }
-
-      const { prompt, isDebugMode } = data;
+      const { prompt } = data;
       if (!prompt) return;
 
       console.log(`[WS:In] 廣播確認...`);
-      ws.send(JSON.stringify({ isNew: true, chunk: `【WS 確認收到請求】：${prompt}${isDebugMode ? ' [Debug Mode]' : ''}` }));
+      ws.send(JSON.stringify({ isNew: true, chunk: `【WS 確認收到請求】：${prompt}` }));
 
       if (isProcessBusy) {
         console.warn(`[WS:Busy] 伺服器忙碌中，忽略請求: ${sessionId}`);
@@ -231,15 +219,19 @@ wss.on('connection', (ws) => {
       try {
         console.log(`[WS:Exec] 開始推理流程: ${sessionId}`);
         const coordinator = new Coordinator();
-        await coordinator.coordinate(prompt, {
+        const it = coordinator.coordinate(prompt, {
           getIsAborted: () => isAborted,
           loopCount: 0,
           sessionId,
           workDir: TARGET_DIR,
-          isDebugMode, // 傳遞除錯標記
           signaler: currentSignaler, // 覆蓋預設訊號器
           masterAgentId
         });
+
+        for await (const message of it) {
+            console.log(`  [Stream] Yielded message: ${message.role} - ${(message.text || '').substring(0, 50)}...`);
+            // 此處可根據需求將 message 直接透過 WebSocket 傳回前端
+        }
       } catch (err) {
         console.error(`[WS:Error] 推理執行失敗:`, err);
         ws.send(JSON.stringify({ isNew: true, chunk: `\n❌ 執行錯誤: ${err.message}\n` }));
