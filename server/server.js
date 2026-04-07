@@ -7,8 +7,12 @@ import { WebSocketServer } from 'ws';
 import { fileURLToPath } from 'url';
 import {
   toolbox,
-  Coordinator
+  Coordinator,
+  onLogEvent,
+  onStateUpdate,
+  globalStore
 } from './ai.js';
+import { Signaler } from './agent.js';
 
 dotenv.config();
 
@@ -22,6 +26,37 @@ export const TARGET_DIR = path.join(__dirname, '../src/sandbox');
 
 // --- WebSocket 全域追蹤與發送工具 ---
 const activeClients = new Set();
+const sessionSignalers = new Map(); // 關鍵：追蹤每個 session 的 Signaler
+
+// --- 集中日誌紀錄與持久化 (Log Persistence) ---
+const HISTORY_DIR = path.join(__dirname, 'history');
+fs.ensureDirSync(HISTORY_DIR);
+
+const logQueue = [];
+let isProcessingQueue = false;
+
+async function processLogQueue() {
+  if (isProcessingQueue || logQueue.length === 0) return;
+  isProcessingQueue = true;
+  try {
+    while (logQueue.length > 0) {
+      const logItem = logQueue.shift();
+      const { data, now } = logItem;
+      try {
+        const fileName = data?.session_id ? `log_${data.session_id}.json` : `log_${now.toISOString().split('T')[0]}.json`;
+        const historyPath = path.join(HISTORY_DIR, fileName);
+        let logs = (await fs.pathExists(historyPath)) ? (await fs.readJson(historyPath)) : [];
+        logs.push({ ...logItem, timestamp: now.toLocaleString() });
+        await fs.writeJson(historyPath, logs, { spaces: 2 });
+      } catch (err) { console.error('[Server:LogItemError]', err); }
+    }
+  } catch (err) {
+    console.error('[Server:QueueCriticalError]', err);
+  } finally {
+    isProcessingQueue = false;
+    if (logQueue.length > 0) processLogQueue();
+  }
+}
 
 const broadcast = (data) => {
   const message = JSON.stringify(data);
@@ -29,6 +64,29 @@ const broadcast = (data) => {
     if (ws.readyState === 1) ws.send(message);
   });
 };
+
+// --- 監聽 AI 推理日誌並廣播 ---
+// 在伺服器端將日誌細項封裝在「logItem」欄位下
+onLogEvent((logItem) => {
+  // 1. WebSocket 廣播
+  broadcast({
+    type: 'reasoning_log',
+    logItem: { ...logItem, timestamp: logItem.now?.toLocaleString() }
+  });
+
+  // 2. 磁碟持久化
+  logQueue.push(logItem);
+  processLogQueue();
+});
+
+onStateUpdate(({ sessionId, key, value }) => {
+    broadcast({
+        type: 'workflow_state',
+        sessionId,
+        key,
+        value
+    });
+});
 
 // --- 註冊 工具鉤子 (Hooks) ---
 // 註解：現在我們直接使用 broadcast，不再依賴 context.onChunk
@@ -124,34 +182,73 @@ let isProcessBusy = false;
 
 wss.on('connection', (ws) => {
   activeClients.add(ws);
-  console.log(`[WS] 連結建立 (目前活躍客戶端: ${activeClients.size})`);
+  const sessionId = `SESSION-${Date.now()}`;
+  const masterAgentId = `AGENT-MASTER-${Math.random().toString(36).substring(2, 5).toUpperCase()}`;
+  console.log(`[WS] 連結建立 (Session: ${sessionId}, ID: ${masterAgentId})`);
   let isAborted = false;
 
-  ws.on('message', async (message) => {
+  ws.on('message', async (rawMessage) => {
+    console.log(`[WS:In] 接收數據: ${rawMessage.toString().substring(0, 100)}...`);
     try {
-      const { prompt } = JSON.parse(message.toString());
+      const data = JSON.parse(rawMessage.toString());
+      console.log(`[WS:Route] 類型: ${data.type || 'DEFAULT'}, Session: ${data.sessionId || sessionId}`);
+      if (data.type === 'DEBUG_CONTINUE') {
+        const idToUnlock = data.sessionId || sessionId;
+        const targetSignaler = sessionSignalers.get(idToUnlock);
+        if (targetSignaler) {
+            console.log(`[Debug] 解鎖指令已送達 Session: ${idToUnlock}`);
+            targetSignaler.emit('debug_continue', { success: true });
+        } else {
+            console.warn(`[Debug] 找不到對應的啟動中 Signaler: ${idToUnlock}`);
+        }
+        return;
+      }
 
-      ws.send(JSON.stringify({ isNew: true, chunk: `【WS 即時接收確認】：${prompt}` }));
+      const { prompt, isDebugMode } = data;
+      if (!prompt) return;
+
+      console.log(`[WS:In] 廣播確認...`);
+      ws.send(JSON.stringify({ isNew: true, chunk: `【WS 確認收到請求】：${prompt}${isDebugMode ? ' [Debug Mode]' : ''}` }));
 
       if (isProcessBusy) {
-        broadcast({ isNew: true, chunk: '\n[系統提示]：伺服器忙碌中...\n' });
+        console.warn(`[WS:Busy] 伺服器忙碌中，忽略請求: ${sessionId}`);
+        ws.send(JSON.stringify({ isNew: true, chunk: '\n[系統提示]：伺服器忙碌中，請稍候再試或重啟對話。\n' }));
         return;
       }
       isProcessBusy = true;
 
+      // 3. 手動發送一個初始化日誌，讓 UI 方塊立即出現 (預熱)
+      await globalStore.log("AGENT_START", {
+          prompt: 'System',
+          data: { session_id: sessionId, role: 'Coordinator', round: 1, agent_id: masterAgentId }
+      });
+      globalStore.setState(sessionId, 'status', 'initializing');
+
+      // 2. 初始化此 Session 的訊號器
+      const currentSignaler = new Signaler();
+      sessionSignalers.set(sessionId, currentSignaler);
+
       try {
-        // 1. 使用獨立的協調者元件分析需求並指派任務
+        console.log(`[WS:Exec] 開始推理流程: ${sessionId}`);
         const coordinator = new Coordinator();
         await coordinator.coordinate(prompt, {
           getIsAborted: () => isAborted,
           loopCount: 0,
-          workDir: TARGET_DIR // 強制工作區域
+          sessionId,
+          workDir: TARGET_DIR,
+          isDebugMode, // 傳遞除錯標記
+          signaler: currentSignaler, // 覆蓋預設訊號器
+          masterAgentId
         });
+      } catch (err) {
+        console.error(`[WS:Error] 推理執行失敗:`, err);
+        ws.send(JSON.stringify({ isNew: true, chunk: `\n❌ 執行錯誤: ${err.message}\n` }));
       } finally {
         isProcessBusy = false;
+        sessionSignalers.delete(sessionId);
         if (!isAborted && ws.readyState === 1) ws.send(JSON.stringify({ done: true }));
+        console.log(`[WS:Done] Session 結束: ${sessionId}`);
       }
-
     } catch (err) { console.error('[WS Error]', err); }
   });
 

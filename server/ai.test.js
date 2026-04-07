@@ -52,8 +52,8 @@ describe('平坦化執行流程綜合測試', () => {
         });
 
         // 1. 斷言數據流
-        expect(capturedPrompts[0]).toContain("你是一個強大的【任務協調者");
-        expect(capturedPrompts[1]).toContain("你是一個具備「思考與執行合一」能力的高級前端工程師 Worker");
+        expect(capturedPrompts[0]).toContain("你是一個強大的【協調者 (Coordinator)】");
+        expect(capturedPrompts[1]).toContain("你是一個【偵查者 (Explorer)】");
         
         // 2. 斷言 Session
         expect(sessionId).toBeDefined();

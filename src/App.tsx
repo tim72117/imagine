@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef, Suspense } from 'react';
-import { Send, MessageSquare, Layout, Layers, RefreshCw, Smartphone, Monitor, Loader2, Square } from 'lucide-react';
+import { Send, MessageSquare, Layout, Layers, RefreshCw, Smartphone, Monitor, Loader2, Square, Activity } from 'lucide-react';
 import { motion } from 'framer-motion';
 import axios from 'axios';
 import ReactMarkdown from 'react-markdown';
+import ReasoningFlow from './components/ReasoningFlow';
 
 // --- Dynamic Sandbox Iframe Component ---
 function SandboxIframe({ code, isLoading }: { code: string, isLoading: boolean }) {
@@ -82,6 +83,9 @@ export default function App() {
 
   const [code, setCode] = useState<string>('');
   const [isLoadingCode, setIsLoadingCode] = useState(true);
+  const [reasoningLogs, setReasoningLogs] = useState<any[]>([]);
+  const [workflowNodes, setWorkflowNodes] = useState<Map<string, any>>(new Map());
+  const [isDebugMode, setIsDebugMode] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const socketRef = useRef<WebSocket | null>(null);
 
@@ -123,6 +127,8 @@ export default function App() {
     const currentInput = input;
     setInput('');
     setIsProcessing(true);
+    setReasoningLogs([]); // 清空前次推理日誌
+    setWorkflowNodes(new Map()); // 清空前次節點
     setStatusMessage('發送請求至端點...');
 
     // --- WebSocket 切換實作 ---
@@ -131,7 +137,7 @@ export default function App() {
     let accumulatedContent = '';
 
     socket.onopen = () => {
-      socket.send(JSON.stringify({ prompt: currentInput }));
+      socket.send(JSON.stringify({ prompt: currentInput, isDebugMode }));
     };
 
     socket.onmessage = (event) => {
@@ -148,6 +154,19 @@ export default function App() {
         if (data.type === 'refresh') { fetchLatestCode(); return; }
         if (data.type === 'status') { setStatusMessage(data.message); return; }
         if (data.statusMessage) { setStatusMessage(data.statusMessage); return; }
+
+        if (data.type === 'reasoning_log') {
+          setReasoningLogs(prev => [...prev, data.logItem]);
+          return;
+        }
+
+        if (data.type === 'workflow_state') {
+            if (data.key === 'workflow_nodes') {
+                const nodesList = data.value as any[];
+                setWorkflowNodes(new Map(nodesList.map(n => [n.id, n])));
+            }
+            return;
+        }
 
         if (data.isNew) {
           accumulatedContent = ''; 
@@ -181,6 +200,13 @@ export default function App() {
     };
   };
 
+  const handleContinue = () => {
+    if (socketRef.current) {
+        // 發送解鎖訊號
+        socketRef.current.send(JSON.stringify({ type: 'DEBUG_CONTINUE' }));
+    }
+  };
+
   return (
     <div className="flex w-full h-screen font-sans bg-background overflow-hidden relative">
       <div className="glow-bg" />
@@ -208,11 +234,12 @@ export default function App() {
               </button>
             </div>
           </header>
-          <main className="flex-1 overflow-y-auto overflow-x-hidden flex items-start justify-center pt-8">
+          <main className="flex-1 overflow-y-auto overflow-x-hidden flex flex-col items-center pt-8 px-4 pb-20 custom-scrollbar">
             <motion.div
               layout
               className={`${previewMode === 'mobile' ? 'w-[375px]' : 'w-full max-w-6xl'} transition-all duration-500`}
             >
+              {isDebugMode && <ReasoningFlow nodes={workflowNodes} onContinue={handleContinue} />}
               <SandboxIframe code={code} isLoading={isLoadingCode} />
             </motion.div>
           </main>
@@ -226,9 +253,19 @@ export default function App() {
               </div>
               <div>
                 <h2 className="text-lg font-bold">AI Agent</h2>
-                <span className="text-xs text-green-500 flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span> 線上狀態 (WS)
-                </span>
+                <div className="flex items-center gap-4 mt-1">
+                  <span className="text-[10px] text-green-500 flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span> WS
+                  </span>
+                  <button 
+                    onClick={() => setIsDebugMode(!isDebugMode)}
+                    className={`text-[10px] flex items-center gap-1 transition-colors px-2 py-0.5 rounded border ${
+                      isDebugMode ? 'bg-orange-500/20 text-orange-400 border-orange-500/50' : 'text-zinc-500 border-white/10 hover:border-white/30'
+                    }`}
+                  >
+                    <Activity className={`w-3 h-3 ${isDebugMode ? 'animate-pulse' : ''}`} /> Debug Mode
+                  </button>
+                </div>
               </div>
             </div>
           </header>
