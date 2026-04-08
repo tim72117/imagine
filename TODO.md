@@ -1,5 +1,32 @@
 # AI 代理通訊架構實驗筆記 (TODO)
 
+## 代理人架構重構：事件驅動與解耦 (Event-Driven & Decoupling Refactor)
+### 實作日期：2026-04-08
+
+### 核心變動摘要
+完全移除 Agent 內部的 Signaler 喚醒機制，達成「極簡 Agent」與「強大 Coordinator」的協作模式。
+
+#### 1. Agent 類別 (agent.ts) - 執行層
+- **零阻塞運行**: 移除產生器內部的 `await signaler.wait(...)` 呼叫。
+- **即取即停**: Agent 在每一輪開始時主動清空 `commandQueue`；一旦任務階段性完成、需要使用者介入、或是分配了子任務，立即結束實例 (break)。
+- **純粹狀態機**: 不再關心指令來源，僅專注處理目前 `context.messages` 中的歷史紀錄。
+
+#### 2. Coordinator 類別 (ai.ts) - 調度層
+- **統一事件中心**: 作為長駐型產生器，外部統一監聽 `Signaler`。
+- **先同步、後執行**: 偵測到指令異動後，先將 `commandQueue` 訊息合併至歷史紀錄，再投射新的 Agent 實例接續處理。
+- **指令隊列維護**: 職責上移至 Coordinator，確保 Agent 啟動時看到完整狀態。
+
+#### 3. spawn_workers 工具 (tools.ts) - 指令層
+- **一致性回傳機制**: 子任務推論結束後，**由調派工具 (spawn_workers) 負責**將彙整後的推論資訊格式化為 tool 角色訊息，推入父 Agent 的 `commandQueue` 並觸發 `new_command` 訊號。
+- **事件驅動流程**: 子任務處理完結後，訊息推入隊列，等待父 Agent 實例結束（或已結束）後，再由調度者啟動新的 Agent 實例接續處理。
+
+### 架構優勢
+- **各司其職**: Server 負責接收，Coordinator 負責排程與狀態同步，Agent 負責純粹推理。
+- **資源效率**: Agent 執行完畢即銷毀，具備更強的可觀測性與資源回收效率。
+- **測試便利**: Agent 不再依賴異步隊列，易於進行核心推理邏輯的單元測試。
+
+---
+
 ## 實驗議題：流式時序執行 (Sequential Streaming Flush)
 ### 實作日期：2026-03-31
 

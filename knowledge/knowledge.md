@@ -113,7 +113,7 @@ return {
   ...parentContext,
   // 隔離 setAppState
   setAppState: overrides?.shareSetAppState ? parentContext.setAppState : () => {},
-  
+
   // 策略性 getAppState 覆蓋
   getAppState: () => {
     const state = parentContext.getAppState()
@@ -133,13 +133,53 @@ return {
 
 ---
 
-## 5. 知識總結對應表
+---
+
+## 5. Agent 訊號與喚醒機制 (Wake-up Mechanism)
+
+### 5.1 統一指令隊列 (`src/utils/messageQueueManager.ts`)
+系統維護一個全域的 `commandQueue`，作為非同步事件的「降落場」：
+*   **用途**：接收使用者輸入、子 Agent 完成通知、或是非同步工具的結果。
+*   **觸發通報**：
+    1.  訊息進入隊列：執行 `commandQueue.push()`。
+    2.  發出訊號：呼叫 `notifySubscribers()` ➜ `queueChanged.emit()`。
+*   **設計優點**：解耦 (Decoupling)，訊息產生者（如背景任務）不需要知道處理者（REPL）在哪裡。
+
+### 5.2 隊列處理器 (`src/hooks/useQueueProcessor.ts`)
+這是位於 UI 外殼的監聽器，負責監控「紅綠燈」並喚醒 Agent：
+*   **訂閱模式**：使用 `useSyncExternalStore` 監聽 `queueChanged` 訊號。
+*   **喚醒條件**：
+    1.  `isQueryActive === false`（Agent 處於閒置狀態）。
+    2.  `commandQueue` 中有待處理訊息。
+*   **處理流程**：`processQueueIfReady` ➜ `executeQueuedInput` ➜ `onQuery` ➜ 啟動新的 `query()` 實例。
+
+---
+
+## 6. 溝通管道與工具執行 (Communication & Tools)
+
+### 6.1 Yield vs. Store
+Agent 對外傳遞資訊有兩條並行路徑：
+*   **`yield` (流式輸出)**：用於傳遞對話文字、工具呼叫事件。優點是能實現即時的「逐字噴出」效果。
+*   **Store (AppState)**：用於同步系統狀態，如 Token 消耗、檔案快照、背景任務進度。
+
+### 6.2 同步與非同步工具處理
+*   **同步工具 (Synchronous Tools)**：如 `read_file`。Agent 直接 `await` 工具結果，回傳後延續**同一個推論回合**。
+*   **非同步工具 (Asynchronous Tools)**：如 `agent_tool`。
+    1.  工具啟動後，Agent 當前回合結束並進入閒置。
+    2.  背景任務完成後，將結果送入 `commandQueue`。
+    3.  透過 **5.2** 的機制喚醒 Agent 開啟**新的推論回合**。
+
+---
+
+## 7. 知識總結對應表 (更新版)
 
 | 功能節點 | 核心檔案 | 關鍵點 |
 | :--- | :--- | :--- |
-| **狀態讀取** | `store.ts` | 簡單參照回傳。 |
-| **狀態寫入** | `store.ts` | 不可變更新 + 引用檢查。 |
+| **狀態讀取/寫入** | `store.ts` | 簡單參照回傳、不可變更新 + 引用檢查。 |
 | **全域副作用** | `onChangeAppState.ts` | 同步 CCR、持久化、清理快取。 |
-| **子代理建立** | `forkedAgent.ts` | `createSubagentContext` 建立受控複本。 |
+| **子代理建立** | `forkedAgent.ts` | `createSubagentContext` 建立受控複本（環境隔離）。 |
 | **訊息遞移** | `query.ts` | 在循環終端合併陣列並遞回至下一輪。 |
-| **任務更新** | `framework.ts` | `updateTaskState` 用於安全地修改 `AppState.tasks`。 |
+| **任務更新** | `framework.ts` | `updateTaskState` 用於安全修改 `AppState.tasks`。 |
+| **訊息傳遞** | `REPL.tsx` / `query.ts` | 對話走 `yield` 流，元數據走 `store`。 |
+| **異步喚醒** | `useQueueProcessor.ts` | 監聽 `commandQueue` 訊號，於閒置時啟動新推論。 |
+| **工具執行** | `AgentTool.tsx` | 同步直接回傳，異步走 `commandQueue` 流程。 |

@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "server": "nodemon --ignore server/history/ --ignore server/fixtures/ server/server.js",
+    "server": "tsx watch --ignore server/history/ --ignore server/fixtures/ server/server.ts",
     "test": "vitest run"
   },
   "dependencies": {
@@ -25,13 +25,19 @@
     "ws": "^8.20.0"
   },
   "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/fs-extra": "^11.0.4",
+    "@types/node": "^25.5.2",
     "@types/react": "^18.3.5",
     "@types/react-dom": "^18.3.0",
+    "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^4.3.1",
     "autoprefixer": "^10.4.20",
     "nodemon": "^3.1.14",
     "postcss": "^8.4.47",
     "tailwindcss": "^3.4.11",
+    "tsx": "^4.21.0",
     "typescript": "^5.5.3",
     "vite": "^5.4.2",
     "vitest": "^4.1.2"
