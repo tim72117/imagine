@@ -15,59 +15,62 @@ export const onLogEvent = (callback: (data: any) => void) => { appStore.on('upda
 export const onStateUpdate = (callback: (data: any) => void) => { appStore.on('state_update', callback); };
 
 // --- 主要入口 (EntryPoint) ---
-export class Coordinator {
-    toolbox: any;
+import { EventEmitter } from 'events';
+
+export class Coordinator extends EventEmitter {
+    private toolbox: any;
+    private messages: any[] = [];
+    private isRunning: boolean = false;
+
     constructor() {
+        super();
         this.toolbox = toolbox;
     }
 
-    async *coordinate(userPrompt: string, executionContext: any = {}) {
-        // 維護持久化的訊息歷史，初始由隊列驅動
-        const messages: any[] = [];
+    /**
+     * 啟動背景監聽器，永不停止。
+     */
+    start() {
+        if (this.isRunning) return;
+        this.isRunning = true;
+        console.log(`[Coordinator] 🛰️ 背景監聽器已啟動...`);
 
-        if (userPrompt) {
-            commandQueue.push({ role: 'user', text: userPrompt, time: Date.now() });
-            queueChanged.emit('changed');
-        }
-
-        const runAgentInstance = async function* (history: any[]) {
-            const taskId = createTask({ role: 'Coordinator', agentId: executionContext.masterAgentId });
-            const ctx = createAgentContext({
-                ...executionContext,
-                taskId,
-                workDir: executionContext.workDir,
-                messages: history
-            });
-
-            if (executionContext._internal_context_ref) {
-                Object.assign(executionContext._internal_context_ref, ctx);
-            }
-
-            const master = new Agent(ROLES.coordinator, toolbox);
-            const it = master.run(ctx);
-            while (true) {
-                const { value, done } = await it.next();
-                if (done) break;
-                yield value;
-            }
-        };
-
-        // --- 事件驅動調度循環 ---
-        while (true) {
-            // 1. 提取全域隊列
+        // 監聽異動訊號
+        queueChanged.on('changed', async () => {
             const queue = commandQueue.splice(0);
+            if (queue.length === 0) return;
+
+            console.log(`[Coordinator] ⚡️ 偵測到異動，啟動並行推理 (處理 ${queue.length} 項指令)`);
+            this.messages.push(...queue);
             
-            // 2. 若目前沒事做，則「等待異動事件」再啟動推理
-            if (queue.length === 0) {
-                console.log(`[Coordinator] 🛰️ 等待全域異動事件...`);
-                await new Promise(resolve => queueChanged.once('changed', resolve));
-                continue; 
-            }
-            
-            // 3. 併入指令並啟動 Agent 實例
-            console.log(`[Coordinator] ⚡️ 偵測到異動，啟動推理實例 (處理 ${queue.length} 項指令)`);
-            messages.push(...queue);
-            yield* runAgentInstance(messages);
+            // 由於是事件驅動，我們直接在此執行 Agent 邏輯並透過事件送出結果
+            await this.processNextBatch();
+        });
+    }
+
+    private async processNextBatch() {
+        const taskId = createTask({ role: 'Coordinator', agentId: 'MASTER' });
+        const context = createAgentContext({
+            taskId,
+            workDir: TARGET_DIR,
+            messages: [...this.messages]
+        });
+
+        const master = new Agent(ROLES.coordinator, toolbox);
+        const iterator = master.run(context);
+        
+        // 消耗產生器並透過事件發布
+        for await (const chunk of iterator) {
+            this.emit('data', chunk);
         }
+        
+        this.emit('completed');
+    }
+
+    // 相容性方法：發送新指令到隊列觸發執行
+    submit(userPrompt: string) {
+        if (!this.isRunning) this.start();
+        commandQueue.push({ role: 'user', text: userPrompt, time: Date.now() });
+        queueChanged.emit('changed');
     }
 }

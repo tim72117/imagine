@@ -158,22 +158,21 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 AI Builder Server running on port ${PORT} (WS Enabled)`);
 });
 
-// --- 啟動全域 Coordinator (單一推理實體) ---
-(async () => {
-    console.log(`[Server:Init] 啟動全域 Coordinator 驅動推理流水線...`);
-    const coordinator = new Coordinator();
-    const it = coordinator.coordinate("", {
-        workDir: TARGET_DIR,
-        masterAgentId: 'AGENT-MASTER-GLOBAL'
-    });
-    try {
-        for await (const message of it) {
-            // 全域消耗流，副作用由 hooks 處理
-        }
-    } catch (err) {
-        console.error(`[GlobalCoordinator:Error]`, err);
+// --- 啟動全域 Coordinator (事件驅動監聽) ---
+const coordinator = new Coordinator();
+
+coordinator.on('data', (message: any) => {
+    // 這裡處理 AI 的通用輸出 (文字片段等)
+    if (message.role === 'assistant' && message.text) {
+        broadcast({ isNew: true });
+        broadcast({ chunk: message.text });
+    } else if (message.type === 'chunk' && message.text) {
+        broadcast({ chunk: message.text });
     }
-})();
+});
+
+coordinator.start();
+console.log(`[Server:Init] 全域 Coordinator 監聽器已啟動.`);
 
 const wss = new WebSocketServer({ server });
 

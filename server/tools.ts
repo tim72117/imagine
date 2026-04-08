@@ -219,41 +219,93 @@ export class Toolbox {
         this.handlers.set(toolName, handler);
     }
 
-    async execute_tool(name: string, args: any, context: AgentContext = {} as any): Promise<ActionResult> {
+    async execute_tool(name: string, args: any, context: AgentContext = {} as any): Promise<any> {
+        const toolDef = ALL_TOOL_DECLARATIONS[name];
+        const isAsync = toolDef?.type === 'async';
         const handler = this.handlers.get(name);
+
         if (!handler) {
             console.error(`  [Tool] ❌ 找不到工具處理器: ${name}`);
             return { success: false, error: 'unknown_tool' };
         }
 
         const stepId = `STEP-${Date.now()}`;
-        console.log(`  [Tool] 🔧 執行工具: ${name} (${stepId})`);
+        const typeLabel = isAsync ? 'AsyncTool' : 'SyncTool';
+        console.log(`  [${typeLabel}] 🔧 執行工具: ${name} (${stepId})`);
 
+        // --- 主程序：準備階段 ---
         await this.runHooks(name, 'before', { toolName: name, args, context });
 
-        context.updateTaskState({ status: 'executing_tool' });
+        // --- 執行階段 (分流處理) ---
+        const result = isAsync 
+            ? await this.runAsyncTool(name, handler, args, context)
+            : await this.runSyncTool(name, handler, args, context);
 
-        const result: ActionResult = await handler(args, context);
+        // --- 主程序：回報與清理階段 ---
+        if (result.success) {
+            console.log(`  [${typeLabel}] ✅ 執行成功: ${name}`);
+        } else {
+            console.log(`  [${typeLabel}] ❌ 執行失敗: ${name} (原因: ${result.error})`);
+        }
+
+        this.recordToolMessage(name, result, context);
+        await this.runHooks(name, 'after', { toolName: name, args, result, context });
+
+        // 回傳執行摘要 (以便能被 Agent 直接 yield)
+        return {
+            role: 'tool',
+            text: result.success ? `[${name}] 執行成功` : `[${name}] 執行失敗: ${result.error}`,
+            time: Date.now(),
+            data: { name, result },
+            deferred: result.deferred,
+            async: result.async
+        };
+    }
+
+    private async runSyncTool(name: string, handler: Function, args: any, context: AgentContext): Promise<ActionResult> {
+        context.updateTaskState({ status: 'executing_tool' });
+        const result = await handler(args, context);
+        context.updateTaskState({ status: result.success ? 'tool_completed' : 'tool_failed' });
+        return result;
+    }
+
+    private async runAsyncTool(name: string, handler: Function, args: any, context: AgentContext): Promise<ActionResult> {
+        context.updateTaskState({ status: 'executing_async_tool' });
+        const result = await handler(args, context);
+        
+        if (result.success && result.promise) {
+            // 在背景監聽 Promise 完成
+            result.promise.then((data: any) => {
+                console.log(`  [AsyncTool] 🔔 ${name} 非同步任務已完成，將結果路由至全域 Queue。`);
+                commandQueue.push({
+                    role: 'tool',
+                    text: `非同步工具 [${name}] 執行成果報告：\n${JSON.stringify(data, null, 2)}`,
+                    time: Date.now(),
+                    data: { toolName: name, result: data }
+                } as any);
+                queueChanged.emit('changed');
+            }).catch((err: any) => {
+                console.error(`  [AsyncTool] ❌ ${name} 非同步任務失敗:`, err);
+            });
+        }
 
         if (result.success) {
-            console.log(`  [Tool] ✅ 執行成功: ${name}`);
-        } else {
-            console.log(`  [Tool] ❌ 執行失敗: ${name} (原因: ${result.error})`);
+            console.log(`  [AsyncTool] 🔔 非同步任務已派發: ${name}`);
         }
-        
-        // 紀錄工具結果 (role: tool)
-        const toolText = result.success ? `Tool Output from ${name}: ${JSON.stringify(result).substring(0, 500)}` : `Error in ${name}: ${result.error}`;
+        return result;
+    }
+
+    private recordToolMessage(name: string, result: ActionResult, context: AgentContext) {
+        const toolText = result.success 
+            ? `Tool Output from ${name}: ${JSON.stringify(result).substring(0, 500)}` 
+            : `Error in ${name}: ${result.error}`;
+            
         context.messages.push({
             role: 'tool',
             text: toolText,
             data: { name, result },
             time: Date.now()
         });
-
-        context.updateTaskState({ status: result.success ? 'tool_completed' : 'tool_failed' });
-
-        await this.runHooks(name, 'after', { toolName: name, args, result, context });
-        return result;
     }
 }
 
@@ -402,20 +454,12 @@ toolbox.register("spawn_workers", async (args: any, context: AgentContext) => {
         }
     });
 
-    Promise.all(workerPromises).then(results => {
-        console.log(`  [Dispatcher] 🔔 子任務已全數完成，將結果路由至 commandQueue。`);
-        
-        // 手動推入全域陣列並發送訊號
-        commandQueue.push({
-            role: 'tool',
-            text: `異步任務成果回報 (${taskCount} 項子任務):\n${JSON.stringify(results, null, 2)}`,
-            time: Date.now()
-        } as any);
-        queueChanged.emit('changed');
-    });
+    const backgroundPromise = Promise.all(workerPromises);
+
     return {
         success: true,
         deferred: true,
+        promise: backgroundPromise, // 將 Promise 交給 runAsyncTool 統一處理
         message: "Workers launched in background.",
         workers_count: taskCount
     };

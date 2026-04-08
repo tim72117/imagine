@@ -54,8 +54,8 @@ export function createTask({ role, agentId }: { role: string, agentId: string })
 /**
  * 建立具備狀態同步能力的 AgentContext
  */
-export function createAgentContext(initFields: any = {}): AgentContext {
-    const context = new AgentContext(initFields);
+export function createAgentContext(initialFields: any = {}): AgentContext {
+    const context = new AgentContext(initialFields);
 
     context.getCurrentTask = function (this: AgentContext) {
         if (!this.taskId) return null;
@@ -120,6 +120,7 @@ export function createAgentContext(initFields: any = {}): AgentContext {
 }
 
 import { AIEngine } from './engine.js';
+import { ROLES } from './tools.js';
 
 export class Agent {
     private roleName: string;
@@ -167,33 +168,38 @@ export class Agent {
             });
 
             const envInfo = `【目前工作目錄】：${workDir || "未定義"}`;
-            const historyText = messages.map(m => m.text).join("\n\n");
+            const historyText = messages.map(m => {
+                const content = m.text || m.parts?.map(p => p.text || '').join('') || '';
+                return content;
+            }).join("\n\n");
             const statusHistory = `【任務歷史】：\n${historyText}`;
             const completeInstruction = `${this.systemPrompt}\n${this.toolPrompt}\n${envInfo}\n${statusHistory}\n\n請根據以上資訊更新開發進展或執行工具。`;
 
-            const stream = engine.generateStream(completeInstruction, { ...context });
-            let aiResponse: any = null;
+            // 準備這一輪的 Assistant 回應物件，並即時推入歷史中
+            const assistantMessage: Message = { role: 'assistant', text: '', parts: [], time: Date.now() };
+            messages.push(assistantMessage);
 
-            for await (const chunk of stream) {
+            const iteratorStream = engine.generateStream(completeInstruction, { ...context });
+            let toolCalled = false;
+
+            for await (const chunk of iteratorStream) {
                 if (chunk.type === 'action' && chunk.action) {
-                    const res = await this.toolbox.execute_tool(chunk.action.name, chunk.action.args, context);
-                    if (res && (res.deferred || res.async)) {
-                         console.log(`  [Agent] ⏳ 偵測到非同步工具 (${chunk.action.name})，中斷當前推理輪次。`);
-                         return { role: this.roleName, agent_id: context.agentId, status: "deferred" };
+                    toolCalled = true;
+                    // 同步記錄工具調用以便後續檢查
+                    assistantMessage.parts!.push({ functionCall: chunk.action });
+                    
+                    const toolResult = await this.toolbox.execute_tool(chunk.action.name, chunk.action.args, context);
+                    
+                    // 若是同步工具，即時回傳執行摘要
+                    if (!toolResult.deferred && !toolResult.async) {
+                        yield toolResult;
                     }
                 } else if (chunk.type === 'chunk') {
+                    // 直接將文字物件推入陣列
+                    assistantMessage.parts!.push({ text: chunk.text });
                     yield chunk;
-                } else if (chunk.type === 'final') {
-                    aiResponse = chunk;
-                    if (aiResponse?.text) {
-                        const finalMsg: Message = { role: 'assistant', text: aiResponse.text, time: Date.now() };
-                        messages.push(finalMsg);
-                        yield finalMsg;
-                    }
                 }
             }
-
-
 
             context.updateTaskState({ status: 'thinking_completed', messages: [...messages] });
 
@@ -203,12 +209,10 @@ export class Agent {
                 progress: context.progress
             });
 
-            if (!aiResponse) break;
-            const actions = aiResponse.actions || [];
-            if (aiResponse.text && !actions.length) {
-                console.log(`  [${this.roleName}] ✨ 本階段任務完成 (文字回報)。`);
-                context.updateTaskState({ status: 'completed', progress: 100, messages: [...context.messages] });
-                return { role: this.roleName, agent_id: context.agentId, status: "success" }; 
+            // 當沒有調用工具時，停止循環
+            if (!toolCalled) {
+                console.log(`  [${this.roleName}] ✨ 本階段任務完成 (無工具調用)。`);
+                break;
             }
         }
 

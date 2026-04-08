@@ -1,6 +1,7 @@
 export interface Message {
     role: 'user' | 'assistant' | 'system' | 'tool';
     text: string;
+    parts?: any[];
     time: number;
     data?: any;
     tool?: string;

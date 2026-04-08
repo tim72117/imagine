@@ -85,9 +85,6 @@ export class AIEngine {
                     }
                 }
             }
-
-            yield { type: 'final', text: accumulatedText };
-
         } finally {
             aiQueue.release();
         }
