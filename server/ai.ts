@@ -37,11 +37,13 @@ export class Coordinator extends EventEmitter {
 
         // 監聽異動訊號
         queueChanged.on('changed', async () => {
+            if (this.messages.length === 0) this.messages = [[], []];
+            
             const queue = commandQueue.splice(0);
             if (queue.length === 0) return;
 
             console.log(`[Coordinator] ⚡️ 偵測到異動，啟動並行推理 (處理 ${queue.length} 項指令)`);
-            this.messages.push(...queue);
+            this.messages[0].push(...queue);
             
             // 由於是事件驅動，我們直接在此執行 Agent 邏輯並透過事件送出結果
             await this.processNextBatch();
@@ -49,6 +51,11 @@ export class Coordinator extends EventEmitter {
     }
 
     private async processNextBatch() {
+        // 初始化二維訊息歷史：[userSide, assistantSide]
+        if (this.messages.length === 0) {
+            this.messages = [[], []];
+        }
+
         const taskId = createTask({ role: 'Coordinator', agentId: 'MASTER' });
         const context = createAgentContext({
             taskId,

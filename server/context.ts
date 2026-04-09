@@ -9,7 +9,7 @@ export class AgentContext {
     status: TaskStatus;
     progress: number;
     round: number;
-    messages: Message[];
+    messages: Message[][];
     workDir: string;
     loopCountLimit?: number;
 
@@ -31,7 +31,7 @@ export class AgentContext {
         this.status = initFields.status || 'pending';
         this.progress = initFields.progress || 0;
         this.round = initFields.round || 0;
-        this.messages = initFields.messages || [];
+        this.messages = initFields.messages || [[], []];
 
         this.workDir = initFields.workDir || './';
 

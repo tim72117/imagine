@@ -300,7 +300,9 @@ export class Toolbox {
             ? `Tool Output from ${name}: ${JSON.stringify(result).substring(0, 500)}` 
             : `Error in ${name}: ${result.error}`;
             
-        context.messages.push({
+        if (context.messages.length === 0) context.messages = [[], []];
+        
+        context.messages[0].push({
             role: 'tool',
             text: toolText,
             data: { name, result },
@@ -431,7 +433,7 @@ toolbox.register("spawn_workers", async (args: any, context: AgentContext) => {
             const childContext = createAgentContext({
                 taskId,
                 agentId: `AGENT-${Math.random().toString(36).substring(2, 7).toUpperCase()}`,
-                messages: [promptMessage], 
+                messages: [[promptMessage], []], 
                 status: 'pending',
                 progress: 0,
                 round: 0,

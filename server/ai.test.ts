@@ -47,25 +47,29 @@ describe('Coordinator', () => {
                 { "text": "送網路請求。\n\n" },
                 {
                     "functionCall": {
-                        "name": "list_files",
+                        "name": "spawn_workers",
                         "args": {
-                            "explanation": "初步了解專案目錄結構，以便定位網頁相關檔案。",
-                            "path": ".",
-                            "next_step": "根據檔案清單尋找 HTML、JS 或 CSS 檔案進行分析。"
+                            "explanation": "啟動專注於分析的 Worker 來深入研究專案結構。",
+                            "tasks": [
+                                { "role": "explorer", "goal": "分析專案結構" }
+                            ]
                         }
                     }
                 }
+            ],
+            [
+                { "text": "分析任務已指派給 Worker，目前正在等待回報。" }
             ]
         ];
         callCount = 0;
         capturedPrompts = [];
 
         const coordinator = new Coordinator();
-        
+
         // 消耗事件
         let yieldCount = 0;
         let isDone = false;
-        
+
         const results: any[] = [];
         coordinator.on('data', (val) => {
             console.log(`[Test:Event]`, JSON.stringify(val));
@@ -78,7 +82,7 @@ describe('Coordinator', () => {
 
         // 等待處理完成訊號，不再死等
         await new Promise(resolve => coordinator.once('completed', resolve));
-        
+
         // 僅保留日誌輸出，不進行斷言
         console.log(`[Test] 流程模擬結束，yieldCount: ${yieldCount}`);
         console.log(`[Test] 混合工具調用流程測試通過！`);

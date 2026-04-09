@@ -39,7 +39,7 @@ export function createTask({ role, agentId }: { role: string, agentId: string })
         role,
         status: 'pending',
         progress: 0,
-        messages: [],
+        messages: [[], []],
         createdAt: new Date()
     };
 
@@ -140,7 +140,7 @@ export class Agent {
     }
 
     async *run(context: AgentContext) {
-        const initialGoal = context.messages[0]?.text || "未定義任務";
+        const initialGoal = context.messages[0]?.[0]?.text || "未定義任務";
 
         await context.getState();
         if (context.status === 'pending') {
@@ -155,8 +155,9 @@ export class Agent {
         while (context.round < MAX_ROUNDS) {
             await context.getState();
 
-            // 解構 Context 屬性以便循環內使用
-            const { round, status, progress, messages, workDir } = context;
+            // 迴圈內先解構 context
+            const { round, messages, workDir } = context;
+            const [userMessages, assistantMessages] = messages;
             let currentRound = round + 1;
             console.log(`  [${this.roleName}] 🔄 第 ${currentRound} 輪循環啟動`);
 
@@ -164,20 +165,24 @@ export class Agent {
                 round: currentRound,
                 status: 'thinking',
                 progress: Math.min(10 + (currentRound * 10), 90),
-                messages: [...messages]
+                messages: [userMessages, assistantMessages]
             });
 
             const envInfo = `【目前工作目錄】：${workDir || "未定義"}`;
-            const historyText = messages.map(m => {
-                const content = m.text || m.parts?.map(p => p.text || '').join('') || '';
+            // 組合兩邊的訊息形成完整歷史以便推論 (依時間或交替排序)
+            const flattenedHistory = [...userMessages, ...assistantMessages].sort((a, b) => (a.time || 0) - (b.time || 0));
+            
+            const historyText = flattenedHistory.map(m => {
+                const content = m.text || m.parts?.map(p => (p as any).text || '').join('') || '';
                 return content;
             }).join("\n\n");
+
             const statusHistory = `【任務歷史】：\n${historyText}`;
             const completeInstruction = `${this.systemPrompt}\n${this.toolPrompt}\n${envInfo}\n${statusHistory}\n\n請根據以上資訊更新開發進展或執行工具。`;
 
-            // 準備這一輪的 Assistant 回應物件，並即時推入歷史中
+            // 準備這一輪的 Assistant 回應物件，並即時推入 assistantMessages 陣列中
             const assistantMessage: Message = { role: 'assistant', text: '', parts: [], time: Date.now() };
-            messages.push(assistantMessage);
+            assistantMessages.push(assistantMessage);
 
             const iteratorStream = engine.generateStream(completeInstruction, { ...context });
             let toolCalled = false;
@@ -185,23 +190,34 @@ export class Agent {
             for await (const chunk of iteratorStream) {
                 if (chunk.type === 'action' && chunk.action) {
                     toolCalled = true;
-                    // 同步記錄工具調用以便後續檢查
+                    // 同步記錄工具調用以便模型上下文完整
                     assistantMessage.parts!.push({ functionCall: chunk.action });
                     
-                    const toolResult = await this.toolbox.execute_tool(chunk.action.name, chunk.action.args, context);
+                    const result = await this.toolbox.execute_tool(chunk.action.name, chunk.action.args, context);
                     
+                    // 將工具執行回報包裝成 tool 角色訊息，直接推入 userMessages
+                    const toolMessage: Message = {
+                        role: 'tool',
+                        text: result.async ? `[${chunk.action.name}] 非同步任務已啟動` : `[${chunk.action.name}] 執行完成`,
+                        time: Date.now(),
+                        data: result,
+                        tool: chunk.action.name
+                    };
+                    
+                    userMessages.push(toolMessage);
+                    yield toolMessage; // 即時送出工具結果訊號
+
                     // 若是同步工具，即時回傳執行摘要
-                    if (!toolResult.deferred && !toolResult.async) {
-                        yield toolResult;
+                    if (!result.deferred && !result.async) {
+                        yield result;
                     }
                 } else if (chunk.type === 'chunk') {
-                    // 直接將文字物件推入陣列
                     assistantMessage.parts!.push({ text: chunk.text });
                     yield chunk;
                 }
             }
 
-            context.updateTaskState({ status: 'thinking_completed', messages: [...messages] });
+            context.updateTaskState({ status: 'thinking_completed', messages: [userMessages, assistantMessages] });
 
             context = context.clone({
                 round: currentRound,

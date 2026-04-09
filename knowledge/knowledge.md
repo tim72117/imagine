@@ -183,3 +183,87 @@ Agent 對外傳遞資訊有兩條並行路徑：
 | **訊息傳遞** | `REPL.tsx` / `query.ts` | 對話走 `yield` 流，元數據走 `store`。 |
 | **異步喚醒** | `useQueueProcessor.ts` | 監聽 `commandQueue` 訊號，於閒置時啟動新推論。 |
 | **工具執行** | `AgentTool.tsx` | 同步直接回傳，異步走 `commandQueue` 流程。 |
+
+---
+
+## 8. ToolUseContext 與 Message 資料結構
+
+### 8.1 ToolUseContext (`src/Tool.ts`)
+這是 Agent 執行工具與推論時的核心上下文物件：
+
+*   **`messages`**: `Message[]` — 儲存對話歷史。
+*   **`abortController`**: 用於取消非同步任務（如 Bash 工具）。
+*   **`getAppState / setAppState`**: 存取全域狀態的介面。
+*   **`agentId / agentType`**: 子代理識別資訊。
+*   **`queryTracking`**: 推論鏈路追蹤（ID 與深度）。
+*   **`options`**: 包含 `tools` (可用工具列表)、`mainLoopModel` (主模型組態) 等。
+
+### 8.2 Message 類型 (`src/utils/messages.ts` / `src/types/message.ts`)
+主要分為以下幾種訊息物件：
+
+#### **UserMessage** (使用者/工具結果)
+```typescript
+{
+  type: 'user',
+  uuid: string,
+  timestamp: string,
+  message: {
+    role: 'user',
+    content: string | ContentBlockParam[] // 可能包含 tool_result 區塊
+  },
+  toolUseResult?: any, // 工具執行的原始回傳資料
+  origin?: 'human' | 'agent'
+}
+```
+
+#### **AssistantMessage** (模型回應)
+```typescript
+{
+  type: 'assistant',
+  uuid: string,
+  timestamp: string,
+  message: {
+    role: 'assistant',
+    content: BetaContentBlock[], // 包含文字 (Text) 或工具調用 (tool_use)
+    usage: { input_tokens: number, output_tokens: number, ... }
+  },
+  requestId?: string
+}
+```
+
+#### **ProgressMessage** (即時進度)
+用於 UI 渲染工具執行的中間狀態（如 Bash 的 stdout 流），不發送給 AI 模型：
+```typescript
+{
+  type: 'progress',
+  data: ProgressData, // 包含 stdout, stderr 或特定工具進度
+  toolUseID: string,
+  parentToolUseID: string
+}
+```
+
+---
+
+## 9. Agent 內部推論循環的結束訊號
+
+Agent 的 `queryLoop` (位於 `src/query.ts`) 透過以下幾種機制判定循環是否結束：
+
+### 9.1 自然結束 (Natural Completion) —— 隱式訊號
+當模型的回覆中不包含任何工具請求時觸發：
+*   **檢查點**：`AssistantMessage` 掃描。
+*   **關鍵變數**：`needsFollowUp`。若模型未產生 `tool_use` 區塊，該變數保持為 `false`。
+*   **結果**：回傳 `{ reason: 'completed' }`。
+
+### 9.2 強制終止 (Forced Termination) —— 顯式訊號
+透過工具回傳的附件 (Attachment) 攔截：
+*   **訊號標記**：`attachment.type === 'hook_stopped_continuation'`。
+*   **觸發源**：通常由 `StopHook` (停止鉤子) 或特定終端工具（如子代理任務完成）產生。
+*   **結果**：回傳 `{ reason: 'hook_stopped' }`。
+
+### 9.3 中斷與限制 (Interrupts & Limits)
+*   **`AbortSignal`**：監測 `toolUseContext.abortController.signal`。若被觸發，回傳 `'aborted_streaming'` 或 `'aborted_tools'`。
+*   **物理限制**：達到 `maxTurns` (最大回合數)、`tokenBudget` (Token 預算) 或 `blocking_limit` (脈絡長度上限)。
+*   **錯誤終止**：發生 `model_error` 或 `image_error` 等不可恢復的 API 錯誤。
+
+### 9.4 終端狀態物件 (Terminal Object)
+循環結束時回傳的物件結構包含 `reason` 欄位，用於通知調用者終止的原因（定義於 `src/query/transitions.ts`）。

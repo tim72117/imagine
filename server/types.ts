@@ -17,7 +17,7 @@ export interface Task {
     status: TaskStatus;
     progress: number;
     round?: number;
-    messages: Message[];
+    messages: Message[][];
     createdAt: Date;
     updatedAt?: Date;
 }
