@@ -119,23 +119,23 @@ export function createAgentContext(initialFields: any = {}): AgentContext {
     return context;
 }
 
-import { AIEngine } from './engine.js';
-import { ROLES } from './tools.js';
+import { AIEngine, AIProvider } from './engine.js';
+import { ROLES, getTools } from './tools.js';
 
 export class Agent {
     private roleName: string;
-    private model: any;
+    private provider: AIProvider;
     private systemPrompt: string;
     private toolPrompt: string;
-    private toolType: string;
+    private allowedTools: string[];
     private toolbox: any;
 
     constructor(config: any, taskRegistry: any) {
         this.roleName = config.name;
-        this.model = config.model;
+        this.provider = config.model;
         this.systemPrompt = config.systemPrompt;
         this.toolPrompt = config.toolPrompt || "";
-        this.toolType = config.type;
+        this.allowedTools = config.allowedTools || [];
         this.toolbox = taskRegistry;
     }
 
@@ -149,7 +149,7 @@ export class Agent {
 
         console.log(`  [${this.roleName}] (${context.agentId}) 🧠 開始任務：${initialGoal.substring(0, 50)}...`);
 
-        const engine = new AIEngine(this.model);
+        const engine = new AIEngine(this.provider);
         const MAX_ROUNDS = context.loopCountLimit || 10;
 
         while (context.round < MAX_ROUNDS) {
@@ -184,7 +184,13 @@ export class Agent {
             const assistantMessage: Message = { role: 'assistant', text: '', parts: [], time: Date.now() };
             assistantMessages.push(assistantMessage);
 
-            const iteratorStream = engine.generateStream(completeInstruction, { ...context });
+            // 修正點：直接呼叫從 tools.ts 導入的 getTools 函式
+            const toolDeclarations = getTools(this.allowedTools);
+
+            const iteratorStream = engine.generateStream(completeInstruction, { 
+                ...context,
+                tools: toolDeclarations
+            });
             let toolCalled = false;
 
             for await (const chunk of iteratorStream) {
