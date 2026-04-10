@@ -1,4 +1,6 @@
-import { createAgentContext, appStore, createTask, Agent, commandQueue, queueChanged } from './agent.js';
+import { appStore, createTask } from './agent.js';
+import { AIEngine, activeProvider } from './engine.js';
+import { commandQueue, queueChanged } from './bus.js';
 import { AgentContext } from './context.js';
 import { toolbox, ROLES } from './tools.js';
 
@@ -38,13 +40,15 @@ export class Coordinator extends EventEmitter {
         // 監聽異動訊號
         queueChanged.on('changed', async () => {
             if (this.messages.length === 0) this.messages = [[], []];
-            
+
             const queue = commandQueue.splice(0);
             if (queue.length === 0) return;
 
+
+
             console.log(`[Coordinator] ⚡️ 偵測到異動，啟動並行推理 (處理 ${queue.length} 項指令)`);
             this.messages[0].push(...queue);
-            
+
             // 由於是事件驅動，我們直接在此執行 Agent 邏輯並透過事件送出結果
             await this.processNextBatch();
         });
@@ -57,20 +61,22 @@ export class Coordinator extends EventEmitter {
         }
 
         const taskId = createTask({ role: 'Coordinator', agentId: 'MASTER' });
-        const context = createAgentContext({
+        const engine = new AIEngine(activeProvider);
+
+        // 直接調用 Go 引擎，由 Go 的 Agent.Run 處理所有的推論循環與工具執行
+        const iterator = engine.generateStream("", {
             taskId,
+            role: 'explorer',
             workDir: TARGET_DIR,
-            messages: [...this.messages]
+            userMessages: this.messages[0],
+            assistantMessages: this.messages[1]
         });
 
-        const master = new Agent(ROLES.coordinator, toolbox);
-        const iterator = master.run(context);
-        
         // 消耗產生器並透過事件發布
         for await (const chunk of iterator) {
             this.emit('data', chunk);
         }
-        
+
         this.emit('completed');
     }
 

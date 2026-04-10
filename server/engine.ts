@@ -1,259 +1,114 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
-import axios from 'axios';
-import { AgentConfig } from './types.js';
-import dotenv from 'dotenv';
+import { spawn } from 'child_process';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
-dotenv.config();
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const CLI_PATH = path.join(__dirname, 'engine-go/engine-cli');
 
-const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY!);
+// --- Types ---
 
-// --- 介面定義 (Interfaces) ---
-
-export interface AIChunk {
-    type: 'chunk';
-    text: string;
-}
-
-export interface AIAction {
-    type: 'action';
-    action: {
+export interface AIEvent {
+    type: 'chunk' | 'action' | 'tool_result';
+    text?: string;
+    action?: {
         name: string;
         args: any;
     };
+    tool?: string;
 }
-
-export type AIEvent = AIChunk | AIAction;
 
 export interface AIProvider {
-    generateStream(inputPrompt: string, context: any): AsyncGenerator<AIEvent>;
+    id: 'gemini' | 'ollama';
 }
 
-// --- 請求隊列管理 (Queue Management) ---
+// --- Provider Instances ---
 
-class AIRequestQueue {
-    private maxConcurrent: number;
-    private minIntervalMs: number;
-    private currentCount: number;
-    private queue: { requestTask: () => Promise<any>, resolve: (val: any) => void, reject: (err: any) => void }[];
-    private lastCallTime: number;
-
-    constructor(maxConcurrent = 2, minIntervalMs = 1000) {
-        this.maxConcurrent = maxConcurrent;
-        this.minIntervalMs = minIntervalMs;
-        this.currentCount = 0;
-        this.queue = [];
-        this.lastCallTime = 0;
-    }
-
-    async enqueue(requestTask: () => Promise<any>): Promise<any> {
-        return new Promise((resolve, reject) => {
-            this.queue.push({ requestTask, resolve, reject });
-            this.process();
-        });
-    }
-
-    async process() {
-        if (this.currentCount >= this.maxConcurrent || this.queue.length === 0) return;
-
-        const now = Date.now();
-        const timeSinceLast = now - this.lastCallTime;
-        if (timeSinceLast < this.minIntervalMs) {
-            setTimeout(() => this.process(), this.minIntervalMs - timeSinceLast);
-            return;
-        }
-
-        const item = this.queue.shift();
-        if (!item) return;
-        const { requestTask, resolve, reject } = item;
-        this.currentCount++;
-        this.lastCallTime = now;
-
-        try {
-            const result = await requestTask();
-            resolve(result);
-        } catch (err) {
-            this.currentCount--; // 發生錯誤時釋放配額
-            reject(err);
-            this.process();
-        }
-    }
-
-    release() {
-        this.currentCount--;
-        this.process();
-    }
-}
-
-export const aiQueue = new AIRequestQueue(2, 500);
-
-// --- Google Gemini Provider ---
-
-export class GeminiProvider implements AIProvider {
-    private model: any;
-    constructor(modelInstance: any) {
-        this.model = modelInstance;
-    }
-
-    async *generateStream(inputPrompt: string, context: any): AsyncGenerator<AIEvent> {
-        const streamResponse = await aiQueue.enqueue(async () => {
-            return await this.model.generateContentStream({
-                contents: [{ role: "user", parts: [{ text: inputPrompt }] }]
-            });
-        });
-
-        try {
-            for await (const chunk of streamResponse.stream) {
-                if (context.getIsAborted?.()) break;
-                const candidate = chunk.candidates?.[0];
-                if (!candidate?.content?.parts) continue;
-
-                for (const part of candidate.content.parts) {
-                    if (part.text) {
-                        yield { type: 'chunk', text: part.text };
-                    }
-                    if (part.functionCall) {
-                        yield { type: 'action', action: { name: part.functionCall.name, args: part.functionCall.args } };
-                    }
-                }
-            }
-        } finally {
-            aiQueue.release();
-        }
-    }
-}
-
-// --- Ollama Provider ---
-
-export class OllamaProvider implements AIProvider {
-    private baseURL: string;
-    private modelName: string;
-
-    constructor(config: { baseURL: string, model: string }) {
-        this.baseURL = config.baseURL;
-        this.modelName = config.model;
-    }
-
-    async *generateStream(inputPrompt: string, context: any): AsyncGenerator<AIEvent> {
-        // 將通用的工具定義轉換為 Ollama (OpenAI) 格式
-        const ollamaTools = context.tools?.[0]?.functionDeclarations?.map((decl: any) => ({
-            type: 'function',
-            function: {
-                name: decl.name,
-                description: decl.description,
-                parameters: decl.parameters
-            }
-        }));
-
-        const responseData = await aiQueue.enqueue(async () => {
-            try {
-                console.log(`[Ollama] 🛠️  準備發送工具定義:`);
-                console.log(JSON.stringify(ollamaTools, null, 2));
-                console.log(`[Ollama] 📡 正在對 ${this.baseURL} 發起請求 (模型: ${this.modelName})...`);
-                const res = await axios.post(`${this.baseURL}/api/chat`, {
-                    model: this.modelName,
-                    messages: [{ role: 'user', content: inputPrompt }],
-                    stream: true,
-                    think: false,
-                    tools: ollamaTools
-                }, {
-                    responseType: 'stream',
-                    timeout: 300000 // 增加至 5 分鐘，給予大型模型（如 26B）充足的預處理時間
-                });
-                console.log(`[Ollama] ✅ 已建立串流連線 (Status: ${res.status})`);
-                return res.data;
-            } catch (err: any) {
-                console.error(`[Ollama] ❌ 請求失敗: ${err.message}`);
-                if (err.response) {
-                    console.error(`[Ollama] 錯誤詳情:`, err.response.data);
-                }
-                throw err;
-            }
-        });
-
-        let buffer = '';
-        try {
-            for await (const chunk of responseData) {
-                if (context.getIsAborted?.()) break;
-
-                buffer += chunk.toString();
-                const lines = buffer.split('\n');
-
-                // 最後一行可能不完整，保留到下一次處理
-                buffer = lines.pop() || '';
-
-                for (const line of lines) {
-                    if (!line.trim()) continue;
-                    try {
-                        const json = JSON.parse(line);
-
-                        // 處理思考內容 (Thinking)
-                        if (json.message?.thinking) {
-                            yield { type: 'chunk', text: `\x1b[2m${json.message.thinking}\x1b[0m` };
-                        }
-
-                        // 處理正式文字內容
-                        if (json.message?.content) {
-                            yield { type: 'chunk', text: json.message.content };
-                        }
-
-                        // 處理工具調用
-                        if (json.message?.tool_calls) {
-                            for (const tc of json.message.tool_calls) {
-                                yield {
-                                    type: 'action',
-                                    action: {
-                                        name: tc.function.name,
-                                        args: tc.function.arguments
-                                    }
-                                };
-                            }
-                        }
-                    } catch (e) {
-                        // 解析失敗則跳過
-                    }
-                }
-            }
-        } finally {
-            aiQueue.release();
-        }
-    }
-}
-
-// --- Providers 實例化與管理 ---
+const sharedGemini: AIProvider = { id: 'gemini' };
+const sharedOllama: AIProvider = { id: 'ollama' };
 
 export const geminiProviders = {
-    coordinator: new GeminiProvider(genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" })),
-    explorer: new GeminiProvider(genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" })),
-    editor: new GeminiProvider(genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" }))
+    coordinator: sharedGemini,
+    explorer: sharedGemini,
+    editor: sharedGemini
 };
 
 export const ollamaProviders = {
-    coordinator: new OllamaProvider({ baseURL: 'https://ollama.e-gps.tw', model: 'gemma4:e4b' }),
-    explorer: new OllamaProvider({ baseURL: 'https://ollama.e-gps.tw', model: 'gemma4:e4b' }),
-    editor: new OllamaProvider({ baseURL: 'https://ollama.e-gps.tw', model: 'gemma4:e4b' })
+    coordinator: sharedOllama,
+    explorer: sharedOllama,
+    editor: sharedOllama
 };
 
+// 全域當前使用的 Provider 指標
+export let activeProvider: AIProvider = geminiProviders.coordinator;
+
 /**
- * 全域切換引擎
+ * 全域引擎切換工具
  */
-export function setGlobalEngine(type: 'gemini' | 'ollama', ROLES: Record<string, AgentConfig>) {
-    const target = type === 'ollama' ? ollamaProviders : geminiProviders;
-    console.log(`[System] 🔄 全域引擎已切換至: ${type.toUpperCase()}`);
-    ROLES.coordinator.model = target.coordinator;
-    ROLES.explorer.model = target.explorer;
-    ROLES.editor.model = target.editor;
+export function setGlobalEngine(type: 'gemini' | 'ollama') {
+    activeProvider = type === 'ollama' ? ollamaProviders.coordinator : geminiProviders.coordinator;
+    console.log(`[System] 🔄 Global Engine switched to: ${type.toUpperCase()}`);
 }
 
-// --- AIEngine (入口) ---
+// --- AIEngine Proxy ---
 
 export class AIEngine {
-    private provider: AIProvider;
+    private providerId: string;
 
     constructor(provider: AIProvider) {
-        this.provider = provider;
+        this.providerId = provider.id;
     }
 
-    async *generateStream(inputPrompt: string, context: any = {}) {
-        yield* this.provider.generateStream(inputPrompt, context);
+    async *generateStream(instructionPrompt: string, contextObj: any = {}) {
+        const { getIsAborted, model, role, toolsPath, ...remainingContext } = contextObj;
+
+        const commandArguments = [
+            "-json",
+            "-provider", this.providerId,
+            "-model", model?.model || (this.providerId === "ollama" ? "gemma4:e4b" : "gemini-2.5-flash-lite"),
+        ];
+
+        // 如果傳入了完整的歷史訊息，則優先使用 -context 模式將 JSON 傳遞給 Go
+        if (remainingContext.userMessages || remainingContext.assistantMessages) {
+            commandArguments.push("-context", JSON.stringify({
+                systemPrompt: remainingContext.systemPrompt,
+                toolPrompt: remainingContext.toolPrompt,
+                workDir: remainingContext.workDir,
+                userMessages: remainingContext.userMessages || [],
+                assistantMessages: remainingContext.assistantMessages || []
+            }));
+        } else {
+            commandArguments.push("-prompt", instructionPrompt);
+        }
+
+        if (role) {
+            commandArguments.push("-role", role);
+        }
+
+        const childProcess = spawn(CLI_PATH, commandArguments, { env: process.env });
+        let outputBuffer = "";
+
+        for await (const chunk of childProcess.stdout) {
+            if (getIsAborted && getIsAborted()) {
+                childProcess.kill();
+                break;
+            }
+
+            outputBuffer += chunk.toString();
+            const lines = outputBuffer.split("\n");
+            outputBuffer = lines.pop() || "";
+
+            for (const line of lines) {
+                const trimmedLine = line.trim();
+                if (trimmedLine === "") {
+                    continue;
+                }
+                try {
+                    yield JSON.parse(trimmedLine) as AIEvent;
+                } catch (errorVal) {
+                    // 忽略非 JSON 輸出（如偵錯日誌）
+                }
+            }
+        }
     }
 }

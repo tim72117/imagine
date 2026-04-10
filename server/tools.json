@@ -1,0 +1,177 @@
+{
+  "declarations": {
+    "list_files": {
+      "name": "list_files",
+      "description": "獲取專案目錄清單。會為每個檔案產生唯一代碼（如 [F1]），後續工具應優先使用此代碼代替路徑。",
+      "parameters": {
+        "type": "OBJECT",
+        "properties": {
+          "path": {
+            "type": "STRING",
+            "description": "要讀取的目錄路徑（例如: . 或 src/sandbox/）"
+          },
+          "explanation": {
+            "type": "STRING",
+            "description": "說明為何此時需要獲取此清單。"
+          },
+          "next_step": {
+            "type": "STRING",
+            "description": "獲取清單後預計執行的下一步分析動作。"
+          }
+        },
+        "required": [
+          "path",
+          "explanation",
+          "next_step"
+        ]
+      },
+      "type": "sync"
+    },
+    "read_file_content": {
+      "name": "read_file_content",
+      "description": "讀取專案內特定檔案內容。支援使用 list_files 生成的檔案代碼（例如 [F1]）進行精確定位。",
+      "parameters": {
+        "type": "OBJECT",
+        "properties": {
+          "path": {
+            "type": "STRING",
+            "description": "檔案路徑 or 檔案代碼（例：[F1]）"
+          },
+          "explanation": {
+            "type": "STRING",
+            "description": "【極簡】說明為何此時需要調閱此檔案內容。"
+          },
+          "next_step": {
+            "type": "STRING",
+            "description": "讀取並分析內容後，預計要執行的下一步動作。"
+          }
+        },
+        "required": [
+          "path",
+          "explanation",
+          "next_step"
+        ]
+      },
+      "type": "sync"
+    },
+    "update_file": {
+      "name": "update_file",
+      "description": "修改檔案內容 or 產出全新的組件代碼。支援使用檔案代碼（例：[F1]）定位目標。",
+      "parameters": {
+        "type": "OBJECT",
+        "properties": {
+          "path": {
+            "type": "STRING",
+            "description": "目標檔案路徑 or 代碼（例：[F1]）。"
+          },
+          "code": {
+            "type": "STRING",
+            "description": "完整的 React 組件代碼。規範：\n1. 絕對禁止 import。\n2. 僅限一個名為 App 的組件。\n3. 無須 export。\n4. 僅限 React 18 語法與 Tailwind CSS。\n5. 不支援第三方圖示，請用 Emoji 或 Tailwind 組件圖形。"
+          },
+          "explanation": {
+            "type": "STRING",
+            "description": "【極簡】說明本次代碼變更的核心邏輯與修改點。"
+          },
+          "next_step": {
+            "type": "STRING",
+            "description": "檔案更新完成後，預計的後續開發動作。"
+          }
+        },
+        "required": [
+          "path",
+          "code",
+          "explanation",
+          "next_step"
+        ]
+      },
+      "type": "sync"
+    },
+    "plan": {
+      "name": "plan",
+      "description": "當接收到的需求過於龐大，可能需要拆解進行多步驟處理時呼叫。進行架構分析與開發步驟的拆解。",
+      "parameters": {
+        "type": "OBJECT",
+        "properties": {
+          "analysis": {
+            "type": "STRING",
+            "description": "針對大型任務的現狀分析，或針對空泛需求的澄清、假設與困難點拆解邏輯。"
+          },
+          "next_steps_plan": {
+            "type": "ARRAY",
+            "items": {
+              "type": "STRING"
+            },
+            "description": "預計執行的後續具體計畫步驟"
+          }
+        },
+        "required": [
+          "analysis",
+          "next_steps_plan"
+        ]
+      },
+      "type": "sync"
+    },
+    "spawn_workers": {
+      "name": "spawn_workers",
+      "description": "由協調者調派一或多個專屬執行者來處理子任務。你必須根據任務性質選擇「偵查者 (explorer)」，他負責探索專案、閱讀代碼或收集資訊；或選擇「編修者 (editor)」，他負責實作功能、修復錯誤或修改代碼。你可以根據需要同時調派多個執行者並行工作。",
+      "parameters": {
+        "type": "OBJECT",
+        "properties": {
+          "workers": {
+            "type": "ARRAY",
+            "items": {
+              "type": "OBJECT",
+              "properties": {
+                "task": {
+                  "type": "STRING",
+                  "description": "指派給該執行者的具體工作目標。請使用繁體中文描述任務細節。"
+                },
+                "role": {
+                  "type": "STRING",
+                  "enum": [
+                    "explorer",
+                    "editor"
+                  ],
+                  "description": "指派的執行者角色類型。"
+                }
+              },
+              "required": [
+                "task",
+                "role"
+              ]
+            },
+            "description": "執行者列表。每項任務都會啟動一個獨立的執行器。"
+          },
+          "explanation": {
+            "type": "STRING",
+            "description": "說明為何需要此時調派這些執行者，以及它們分工的邏輯。"
+          }
+        },
+        "required": [
+          "workers",
+          "explanation"
+        ]
+      },
+      "type": "async"
+    }
+  },
+  "role_tools": {
+    "coordinator": [
+      "spawn_workers"
+    ],
+    "explorer": [
+      "list_files",
+      "read_file_content"
+    ],
+    "editor": [
+      "read_file_content",
+      "update_file",
+      "plan"
+    ]
+  },
+  "prompts": {
+    "coordinator": "你是一個強大的【協調者 (Coordinator)】。你的職職責是制定策略，並透過「調派 (Spawn Workers)」落實任務。\n\n【執行者角色】：\n1. **偵查者 (Explorer)**: 探索目錄、讀取檔案、報告分析結果。結構不明時優先調派。\n2. **編修者 (Editor)**: 根據已知結構與需求，編修代碼。\n\n【執行準則】：\n1. **探訪優先**: 接收指令後，應先「調派」偵查者去理解專案架構，掌握檔案現況。\n2. **行動導向**: 首輪回應應包含工具調派，避免僅輸出規劃文字。\n3. **指揮分派**: 你不進行開發或檔案操作。必須呼叫 'spawn_workers' 指派任務。\n\n【工具範例】：\nspawn_workers({ \n    explanation: \"初步探索專案結構\", \n    workers: [{ role: \"explorer\", task: \"列出 src 夾下的所有檔案\" }] \n})\n",
+    "explorer": "你是一個【偵查者 (Explorer)】。你的主要職責是探索現有的程式碼庫，掌握專案結構，以便為後續的編修提供情報。\n你的任務目標是釐清檔案位置、分析組件關係或確認實作細節。\n\n【執行準則】：\n- 使用 'list_files' 與 'read_file_content' 來偵察專案。\n- 嚴禁憑空推論，所有結論必須基於讀取到的檔案內容。\n- **具體報備**: 偵查結束時，你必須回報目標檔案的**具體內容摘要或結構**，嚴禁僅回報「我已讀完」。\n- **環境資訊**: 你目前操作於指定的【工作目錄】內，所有路徑皆應相對於此。\n- 完成偵查後，請直接在對話中詳述你的發現與分析結果。\n",
+    "editor": "你是一個【編修者 (Editor)】。你的主要職責是根據明確的需求與檔案路徑，進行具體的代碼實作或修正。\n\n【執行準則】：\n- 在修改前，請確保你已經掌握了目標檔案的相關上下文（如路徑與內容）。\n- 使用 'update_file' 進行代碼變更。\n- 變更完成後，請直接在對話中回報你的實作重點。\n"
+  }
+}

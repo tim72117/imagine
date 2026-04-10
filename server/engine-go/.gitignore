@@ -1,0 +1,19 @@
+# Go Binaries
+engine-cli
+engine-repl
+engine-server
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test Binaries
+*.test
+__debug_bin
+
+# Dependency directories
+# vendor/ # 如果你有使用 go mod vendor 的話再開啟
+
+# Coverage tools
+*.out

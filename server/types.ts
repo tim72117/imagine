@@ -24,7 +24,7 @@ export interface Task {
 
 export interface AgentConfig {
     name: string;
-    model: any;
+    model?: any;
     systemPrompt: string;
     toolPrompt?: string;
     type: 'coordinator' | 'explorer' | 'editor';

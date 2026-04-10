@@ -8,12 +8,9 @@ import { fileURLToPath } from 'url';
 import {
   toolbox
 } from './tools.js';
-import {
-  Coordinator,
-  onLogEvent,
-  onStateUpdate
-} from './ai.js';
-import { createAgentContext, appStore, createTask, Agent, commandQueue, queueChanged } from './agent.js';
+import { appStore, createTask } from './agent.js';
+import { AIEngine, activeProvider } from './engine.js';
+import { onStateUpdate } from './ai.js';
 
 dotenv.config();
 
@@ -158,21 +155,6 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 AI Builder Server running on port ${PORT} (WS Enabled)`);
 });
 
-// --- 啟動全域 Coordinator (事件驅動監聽) ---
-const coordinator = new Coordinator();
-
-coordinator.on('data', (message: any) => {
-    // 這裡處理 AI 的通用輸出 (文字片段等)
-    if (message.role === 'assistant' && message.text) {
-        broadcast({ isNew: true });
-        broadcast({ chunk: message.text });
-    } else if (message.type === 'chunk' && message.text) {
-        broadcast({ chunk: message.text });
-    }
-});
-
-coordinator.start();
-console.log(`[Server:Init] 全域 Coordinator 監聽器已啟動.`);
 
 const wss = new WebSocketServer({ server });
 
@@ -187,15 +169,26 @@ wss.on('connection', (ws: WebSocket) => {
     try {
       const data = JSON.parse(rawMessage.toString());
       const { prompt } = data;
-      // 統一入隊處理，不再區分會話狀態
-      console.log(`[WS:Queue] 指令直接進入全域隊列`);
-      commandQueue.push({
-          role: 'user',
-          text: prompt,
-          time: Date.now()
-      });
-      queueChanged.emit('changed');
+      
+      console.log(`[WS:Go] 🚀 直接啟動 Go 引擎處理指令: ${prompt}`);
       ws.send(JSON.stringify({ isNew: true, chunk: `【指令已接收】：${prompt}` }));
+
+      const engine = new AIEngine(activeProvider);
+      const stream = engine.generateStream("", {
+          userMessages: [{ role: 'user', text: prompt, time: Date.now() }]
+      });
+
+      for await (const chunk of stream) {
+          if (chunk.type === 'chunk' && chunk.text) {
+              ws.send(JSON.stringify({ chunk: chunk.text }));
+          } else if (chunk.type === 'action' && chunk.action) {
+              ws.send(JSON.stringify({ type: 'action', action: chunk.action }));
+          } else if (chunk.type === 'tool_result') {
+              ws.send(JSON.stringify({ isNew: true, chunk: `\n✅ **工具執行完成**：${chunk.action?.name || '未知工具'}` }));
+          }
+      }
+      ws.send(JSON.stringify({ isNew: true, chunk: '\n\n✨ **任務執行完成。**' }));
+
     } catch (err) { console.error('[WS Error]', err); }
   });
 
