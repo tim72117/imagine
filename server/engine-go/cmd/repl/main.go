@@ -19,7 +19,7 @@ import (
 func main() {
 	// 1. 定義 CLI 參數
 	providerName := flag.String("provider", "ollama", "AI provider (gemini or ollama)")
-	modelName := flag.String("model", "gemma4:e4b", "Model name")
+	modelName := flag.String("model", "gemma4:e2b", "Model name")
 	toolsPath := flag.String("tools", "configs/tools.json", "Path to tools.json configuration")
 	flag.Parse()
 

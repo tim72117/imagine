@@ -16,7 +16,7 @@ import (
 func main() {
 	// 定義 CLI 參數
 	providerName := flag.String("provider", "ollama", "AI provider (gemini or ollama)")
-	modelName := flag.String("model", "gemma4:e4b", "Model name")
+	modelName := flag.String("model", "gemma4:e2b", "Model name")
 	prompt := flag.String("prompt", "", "The prompt to send to AI (fallback if -context is not used)")
 	contextJson := flag.String("context", "", "JSON string containing full agent context (userMessages, assistantMessages, etc.)")
 	roleFlag := flag.String("role", "coordinator", "Role name for tool filtering (optional)")

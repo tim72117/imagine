@@ -21,16 +21,35 @@ type Agent struct {
 }
 
 /**
+ * GlobalAgentLoader 全域載入器，預設指向 server/.agent
+ */
+var GlobalAgentLoader = NewAgentLoader("../.agent")
+
+/**
  * NewAgent 建立一個新的代理人實體
  */
 func NewAgent(roleType string, toolsConfig *ToolsConfig, aiProvider provider.AIProvider) *Agent {
+	// 嚴格從 .agent 檔案載入定義
+	agentDef, err := GlobalAgentLoader.GetAgent(roleType)
+	
+	systemPrompt := ""
+	allowedTools := []string{}
+
+	if err == nil {
+		fmt.Printf("  [Agent] 📂 已載入定義檔: %s.agent\n", roleType)
+		systemPrompt = agentDef.Thought
+		allowedTools = agentDef.Tools
+	} else {
+		fmt.Printf("  [Agent] ⚠️ 找不到定義檔 %s.agent，Prompt 將維持為空。\n", roleType)
+	}
+
 	return &Agent{
-		RoleName:     roleType, // 簡化處理，實際可從 config 抓取更精確的名稱
+		RoleName:     roleType,
 		RoleType:     roleType,
 		Provider:     aiProvider,
-		SystemPrompt: toolsConfig.GetRolePrompt(roleType),
-		ToolPrompt:   "請務必在執行工具前，先用文字簡短說明你的行動意圖與原因。", 
-		AllowedTools: toolsConfig.GetRoleTools(roleType),
+		SystemPrompt: systemPrompt,
+		ToolPrompt:   "請務必在執行工具前，先用文字簡短說明你的行動意圖與原因。",
+		AllowedTools: allowedTools,
 		Toolbox:      GlobalToolbox,
 	}
 }
@@ -46,10 +65,10 @@ func (agent *Agent) Run(agentContext *AgentContext, allDeclarations map[string]i
 	go func() {
 		defer close(resultEvents)
 
-		task := agentContext.GetCurrentTask()
+		messages := agentContext.GetMessages()
 		initialGoal := "未定義任務"
-		if task != nil && len(task.Messages[0]) > 0 {
-			initialGoal = task.Messages[0][0].Text
+		if len(messages[0]) > 0 {
+			initialGoal = messages[0][0].Text
 		}
 
 		fmt.Printf("  [%s] (%s) 🧠 開始任務：%s...\n", agent.RoleName, agentContext.AgentID, func() string {
@@ -60,19 +79,24 @@ func (agent *Agent) Run(agentContext *AgentContext, allDeclarations map[string]i
 		}())
 
 		// 同步狀態為 Active
-		agentContext.UpdateTaskState(types.StatusActive, 0)
+		agentContext.SetState("status", types.StatusActive)
+		agentContext.SetState("progress", 0)
 
 		// --- 推論循環 ---
 		for agentContext.Round < maxRounds {
+			// 同步當前狀態到 Store
+			agentContext.SyncState()
+			
 			currentRound := agentContext.Round + 1
 			fmt.Printf("  [%s] 🔄 第 %d 輪循環啟動\n", agent.RoleName, currentRound)
 
-			agentContext.UpdateTaskState(types.StatusThinking, 10+(currentRound*10))
+			agentContext.SetState("status", types.StatusThinking)
+			agentContext.SetState("progress", 10+(currentRound*10))
 			agentContext.Round = currentRound
 
-			task := agentContext.GetCurrentTask()
-			userMessages := task.Messages[0]
-			assistantMessages := task.Messages[1]
+			history := agentContext.GetMessages()
+			userMessages := history[0]
+			assistantMessages := history[1]
 
 			// 1. 準備工具與配置
 			toolDeclarations := GetTools(agent.AllowedTools, allDeclarations)
@@ -140,11 +164,32 @@ func (agent *Agent) Run(agentContext *AgentContext, allDeclarations map[string]i
 
 			// 3. 歸檔本輪助手回應
 			agentContext.AddMessage("assistant", currentAssistantMessage)
-			agentContext.UpdateTaskState(types.StatusThinkingCompleted, 10+(currentRound*10))
+			agentContext.SetState("status", types.StatusThinkingCompleted)
+			agentContext.SetState("progress", 10+(currentRound*10))
 
 			// 檢查是否結束
 			if !toolCalledThisRound {
 				fmt.Printf("  [%s] ✨ 本階段任務完成。\n", agent.RoleName)
+				
+				// 1. 標記當前任務為完成
+				agentContext.SetState("status", types.StatusCompleted)
+				agentContext.SetState("progress", 100)
+				agentContext.SyncState()
+
+				// 2. 如果是子代理，檢查父代理的所有任務是否皆已完成
+				if agentContext.ParentCtx != nil {
+					if agentContext.ParentCtx.IsAllTasksCompleted() {
+						fmt.Printf("  [%s] 🔔 所有子任務已完成，通知父代理 (%s) 繼續...\n", agent.RoleName, agentContext.ParentCtx.AgentID)
+						GlobalCommandQueue <- types.Message{
+							Role:    "system",
+							Text:    fmt.Sprintf("所有子任務已完成，請根據結果匯總進度。最後完成者: %s", agent.RoleName),
+							Time:    time.Now().UnixMilli(),
+							AgentID: agentContext.ParentCtx.AgentID,
+							TaskID:  agentContext.ParentCtx.TaskID,
+						}
+					}
+				}
+
 				break
 			}
 		}

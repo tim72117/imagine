@@ -150,11 +150,11 @@
                 },
                 "role": {
                   "type": "STRING",
+                  "description": "指派的執行者角色類型。",
                   "enum": [
                     "explorer",
                     "editor"
-                  ],
-                  "description": "指派的執行者角色類型。"
+                  ]
                 }
               },
               "required": [
@@ -176,25 +176,5 @@
       },
       "type": "async"
     }
-  },
-  "role_tools": {
-    "coordinator": [
-      "spawn_workers"
-    ],
-    "explorer": [
-      "list_files",
-      "list_files_async",
-      "read_file_content"
-    ],
-    "editor": [
-      "read_file_content",
-      "update_file",
-      "plan"
-    ]
-  },
-  "prompts": {
-    "coordinator": "你是一個強大的【協調者 (Coordinator)】。你的職職責是制定策略，並透過「調派 (Spawn Workers)」落實任務。\n\n【執行者角色】：\n1. **偵查者 (Explorer)**: 探索目錄、讀取檔案、報告分析結果。結構不明時優先調派。\n2. **編修者 (Editor)**: 根據已知結構與需求，編修代碼。\n\n【執行準則】：\n1. **探訪優先**: 接收指令後，應先「調派」偵查者去理解專案架構，掌握檔案現況。\n2. **行動導向**: 首輪回應應包含工具調派，避免僅輸出規劃文字。\n3. **指揮分派**: 你不進行開發或檔案操作。必須呼叫 'spawn_workers' 指派任務。\n\n【工具範例】：\nspawn_workers({ \n    explanation: \"初步探索專案結構\", \n    workers: [{ role: \"explorer\", task: \"列出 src 夾下的所有檔案\" }] \n})\n",
-    "explorer": "你是一個【偵查者 (Explorer)】。你的主要職責是探索現有的程式碼庫，掌握專案結構，以便為後續的編修提供情報。\n你的任務目標是釐清檔案位置、分析組件關係或確認實作細節。\n\n【執行準則】：\n- 使用 'list_files'、'list_files_async' 與 'read_file_content' 來偵察專案。\n- 當你需要列出目錄但不想等待讀取完成，或者是用戶明確要求非同步操作時，請優先使用 'list_files_async'。\n- 嚴禁憑空推論，所有結論必須基於讀取到的檔案內容。\n- **具體報備**: 偵查結束時，你必須回報目標檔案的**具體內容摘要或結構**，嚴禁僅回報「我已讀完」。\n- **環境資訊**: 你目前操作於指定的【工作目錄】內，所有路徑皆應相對於此。\n- 完成偵查後，請直接在對話中詳述你的發現與分析結果。\n",
-    "editor": "你是一個【編修者 (Editor)】。你的主要職責是根據明確的需求與檔案路徑，進行具體的代碼實作或修正。\n\n【執行準則】：\n- 在修改前，請確保你已經掌握了目標檔案的相關上下文（如路徑與內容）。\n- 使用 'update_file' 進行代碼變更。\n- 變更完成後，請直接在對話中回報你的實作重點。\n"
   }
 }

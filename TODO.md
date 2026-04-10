@@ -88,3 +88,4 @@ worker 可以用文字的方式設定技能
     - **原因**: 顯示非同步寫入或併行紀錄時缺乏全域排序機制，這使得回溯「任務因果關係」變得困難。
 
 - GoogleGenerativeAI 
+調度開始時，message內有一個參數是agent id，user 發送的對話沒有agent id，這時就產生一個，將id包在context送進agent作為agentContext，在 agent 內循環時，呼叫context.SetState將agentContext同步進store內的一筆資料，這筆資料可以用agent id找到，agent 若有非同步工具呼叫，就要新增一個task推進agentContext.tasks，將task id agent_id送進執行工具，工具使用結束時將執行結果更新到task中 並將 agent id包進message送進GlobalCommandQueue，調度者這時啟用的agent，就從store取得agent 上一次的資訊作為這次的agentContext，若非同步呼叫是產生新調度時，子agent的context.SetState會被置換成綁定UpdateTaskState，將agentContext同步進父agent在store的context.task內

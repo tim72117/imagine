@@ -45,7 +45,8 @@ func (toolbox *Toolbox) ExecuteTool(name string, args map[string]interface{}, ag
 	}
 
 	// 更新任務狀態
-	agentContext.UpdateTaskState(types.StatusExecutingTool, 0)
+	agentContext.SetState("status", types.StatusExecutingTool)
+	agentContext.SetState("progress", 0)
 
 	// 執行工具邏輯
 	result, err := handler(args, agentContext)
@@ -221,14 +222,27 @@ func init() {
 			role, _ := worker["role"].(string)
 			taskDesc, _ := worker["task"].(string)
 
-			// 提交到全域隊列，使用特殊前綴以便 Coordinator 識別
+			// 1. 為此子任務產生具體的 TaskID 並綁入父 Context
+			taskID := GenerateID("TASK")
+			agentContext.Tasks = append(agentContext.Tasks, taskID)
+			
+			// 建立子任務實體
+			CreateTaskWithID(taskID, role, agentContext.AgentID)
+
+			// 2. 產生此 Worker 的專屬 AgentID
+			workerAgentID := GenerateID("AGENT")
+
+			// 3. 提交到全域隊列，攜帶 AgentID 與 TaskID 以及 ParentAgentID
 			GlobalCommandQueue <- types.Message{
-				Role: "system",
-				Text: fmt.Sprintf("SPAWN:ROLE=%s:TASK=%s", role, taskDesc),
-				Time: time.Now().UnixMilli(),
+				Role:          "system",
+				Text:          fmt.Sprintf("SPAWN:ROLE=%s:TASK=%s", role, taskDesc),
+				Time:          time.Now().UnixMilli(),
+				AgentID:       workerAgentID,
+				TaskID:        taskID,
+				ParentAgentID: agentContext.AgentID,
 			}
 
-			spawnedTasks = append(spawnedTasks, fmt.Sprintf("%s (%s)", role, taskDesc))
+			spawnedTasks = append(spawnedTasks, fmt.Sprintf("%s (%s) [ID: %s]", role, taskDesc, taskID))
 		}
 
 		return types.ActionResult{
@@ -247,7 +261,8 @@ func init() {
  */
 func RunAsyncTool(agentContext *AgentContext, toolName string, args map[string]interface{}) types.AIEvent {
 	// 1. 同步狀態 (可選：模擬進入執行狀態)
-	agentContext.UpdateTaskState(types.StatusActive, 50)
+	agentContext.SetState("status", types.StatusActive)
+	agentContext.SetState("progress", 50)
 
 	// 2. 透過 Toolbox 執行工具
 	result := GlobalToolbox.ExecuteTool(toolName, args, agentContext)
@@ -271,11 +286,13 @@ func RunAsyncTool(agentContext *AgentContext, toolName string, args map[string]i
 	// 增加 3 秒延遲以觀察非同步效果
 	fmt.Printf("[%s] (Debug) 期待 3 秒後觸發下一輪...\n", toolName)
 	go func() {
-		time.Sleep(10 * time.Second)
+		time.Sleep(5 * time.Second)
 		GlobalCommandQueue <- types.Message{
-			Role: "system",
-			Text: fmt.Sprintf("工具 %s 已執行完畢，請根據結果繼續推論。", toolName),
-			Time: time.Now().UnixMilli(),
+			Role:    "system",
+			Text:    fmt.Sprintf("工具 %s 已執行完畢，請根據結果繼續推論。", toolName),
+			Time:    time.Now().UnixMilli(),
+			AgentID: agentContext.AgentID,
+			TaskID:  agentContext.TaskID,
 		}
 	}()
 

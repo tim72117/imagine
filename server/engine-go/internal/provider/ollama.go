@@ -43,11 +43,24 @@ func (p *OllamaProvider) GenerateStream(ctx context.Context, prompt string, opti
 		defer close(events)
 
 		err := p.Queue.Execute(func() error {
+			// 轉換 Gemini 格式的工具宣告為 Ollama 格式
+			var ollamaTools []interface{}
+			if tools, ok := options["tools"].([]map[string]interface{}); ok && len(tools) > 0 {
+				if decls, ok := tools[0]["functionDeclarations"].([]interface{}); ok {
+					for _, d := range decls {
+						ollamaTools = append(ollamaTools, map[string]interface{}{
+							"type":     "function",
+							"function": d,
+						})
+					}
+				}
+			}
+
 			reqBody := ollamaRequest{
 				Model:    p.ModelName,
 				Messages: []interface{}{map[string]string{"role": "user", "content": prompt}},
 				Stream:   true,
-				Tools:    options["tools"],
+				Tools:    ollamaTools,
 			}
 
 			fmt.Printf("[Ollama] 🏗️  Calling %s (Model: %s)\n", p.BaseURL, p.ModelName)
@@ -96,13 +109,33 @@ func (p *OllamaProvider) GenerateStream(ctx context.Context, prompt string, opti
 						// 處理工具調用
 						if toolCalls, ok := message["tool_calls"].([]interface{}); ok {
 							for _, tc := range toolCalls {
-								call := tc.(map[string]interface{})
-								fn := call["function"].(map[string]interface{})
+								call, ok := tc.(map[string]interface{})
+								if !ok {
+									continue
+								}
+								fn, ok := call["function"].(map[string]interface{})
+								if !ok {
+									continue
+								}
+
+								// 嘗試解析參數 (可能可能是 map 或是 JSON 字串)
+								args := fn["arguments"]
+								var parsedArgs map[string]interface{}
+
+								switch v := args.(type) {
+								case map[string]interface{}:
+									parsedArgs = v
+								case string:
+									if err := json.Unmarshal([]byte(v), &parsedArgs); err != nil {
+										fmt.Printf("[Ollama] 無法解析工具參數字串: %v\n", err)
+									}
+								}
+
 								events <- types.AIEvent{
 									Type: "action",
 									Action: &types.ActionData{
 										Name: fn["name"].(string),
-										Args: fn["arguments"],
+										Args: parsedArgs,
 									},
 								}
 							}

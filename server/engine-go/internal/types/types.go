@@ -6,12 +6,15 @@ import (
 
 // Message 代表對話中的單條訊息
 type Message struct {
-	Role  string `json:"role"`
-	Text  string `json:"text"`
-	Parts []Part `json:"parts,omitempty"`
-	Time  int64  `json:"time"`
-	Data  any    `json:"data,omitempty"`
-	Tool  string `json:"tool,omitempty"`
+	Role    string `json:"role"`
+	Text    string `json:"text"`
+	Parts   []Part `json:"parts,omitempty"`
+	Time    int64  `json:"time"`
+	Data    any    `json:"data,omitempty"`
+	Tool    string `json:"tool,omitempty"`
+	AgentID       string `json:"agentId,omitempty"`
+	TaskID        string `json:"taskId,omitempty"`
+	ParentAgentID string `json:"parentAgentId,omitempty"`
 }
 
 // Part 代表訊息中的組件 (文字或工具調用)
@@ -52,8 +55,9 @@ type Task struct {
 	Progress  int        `json:"progress"`
 	Round     int        `json:"round"`
 	Messages  [][]Message `json:"messages"` // [UserMessages, AssistantMessages]
-	CreatedAt time.Time  `json:"createdAt"`
-	UpdatedAt time.Time  `json:"updatedAt,omitempty"`
+	CreatedAt time.Time              `json:"createdAt"`
+	UpdatedAt time.Time              `json:"updatedAt,omitempty"`
+	State     map[string]interface{} `json:"state,omitempty"` // 任務專屬狀態空間
 }
 
 // ActionResult 工具執行的結果
