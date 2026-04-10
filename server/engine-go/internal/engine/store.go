@@ -37,30 +37,28 @@ func (store *AppStore) SetState(key string, value interface{}) {
 func (store *AppStore) GetState(key string) (interface{}, bool) {
 	store.RLock()
 	defer store.RUnlock()
-	val, exists := store.state[key]
-	return val, exists
+	value, exists := store.state[key]
+	return value, exists
 }
 
 /**
- * TryLockAgent 嘗試鎖定 Agent (Atomic-like Check and Set)
- * 如果 Agent 已經在運行中，返回 false；否則設置為運行中並返回 true
+ * TryLockAgent 嘗試鎖定 Agent
  */
 func (store *AppStore) TryLockAgent(agentID string) bool {
 	store.Lock()
 	defer store.Unlock()
 	
-	agents := store.state["agents"].(map[string]*AgentContext)
-	ctx, exists := agents[agentID]
+	agentMap := store.state["agents"].(map[string]*AgentContext)
+	agentContext, exists := agentMap[agentID]
 	if !exists {
-		// 如果 AgentContext 還不存在，允許啟動 (後續會建立)
 		return true
 	}
 	
-	if ctx.IsRunning {
+	if agentContext.IsRunning {
 		return false
 	}
 	
-	ctx.IsRunning = true
+	agentContext.IsRunning = true
 	return true
 }
 
@@ -71,9 +69,9 @@ func (store *AppStore) UnlockAgent(agentID string) {
 	store.Lock()
 	defer store.Unlock()
 	
-	agents := store.state["agents"].(map[string]*AgentContext)
-	if ctx, exists := agents[agentID]; exists {
-		ctx.IsRunning = false
+	agentMap := store.state["agents"].(map[string]*AgentContext)
+	if agentContext, exists := agentMap[agentID]; exists {
+		agentContext.IsRunning = false
 	}
 }
 
@@ -82,85 +80,107 @@ func GenerateID(prefix string) string {
 	return fmt.Sprintf("%s-%d-%s", prefix, time.Now().UnixMilli(), randomPart)
 }
 
-func CreateTask(role string, agentID string) string {
+func CreateTask(role string) string {
 	taskID := GenerateID("TASK")
-	CreateTaskWithID(taskID, role, agentID)
+	CreateTaskWithID(taskID, role)
 	return taskID
 }
 
-func CreateTaskWithID(taskID string, role string, agentID string) {
+func CreateTaskWithID(taskID string, role string) {
 	task := &types.Task{
-		ID:        taskID,
-		AgentID:   agentID,
-		Role:      role,
-		Status:    types.StatusPending,
-		Progress:  0,
-		Messages:  [][]types.Message{{}, {}},
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
-		State:     make(map[string]interface{}),
+		ID:            taskID,
+		Role:          role,
+		Status:        types.StatusPending,
+		Progress:      0,
+		Messages:      [][]types.Message{{}, {}},
+		CreatedAt:     time.Now(),
+		UpdatedAt:     time.Now(),
+		State:         make(map[string]interface{}),
 	}
 
 	GlobalAppStore.Lock()
-	tasks := GlobalAppStore.state["tasks"].(map[string]*types.Task)
-	tasks[taskID] = task
+	taskMap := GlobalAppStore.state["tasks"].(map[string]*types.Task)
+	taskMap[taskID] = task
 	GlobalAppStore.Unlock()
 }
 
-type AgentContext struct {
-	AgentID   string       `json:"agentId"`
-	TaskID    string       `json:"taskId,omitempty"`
-	Tasks     []string     `json:"tasks"`
-	Round     int          `json:"round"`
-	WorkDir   string       `json:"workDir"`
-	Messages  [][]types.Message `json:"messages"`
-	IsRunning bool         `json:"isRunning"` // 新增運行狀態
-	Store     *AppStore    `json:"-"`
-	ParentCtx *AgentContext `json:"-"`
+/**
+ * GetParentContext 透過搜尋所有 Agent 的 Tasks 列表來反查父代理人實體
+ */
+func (store *AppStore) GetParentContext(taskID string) (*AgentContext, bool) {
+	store.RLock()
+	defer store.RUnlock()
 	
+	agentMap := store.state["agents"].(map[string]*AgentContext)
+	for _, agentContext := range agentMap {
+		for _, ownedTaskID := range agentContext.Tasks {
+			if ownedTaskID == taskID {
+				return agentContext, true
+			}
+		}
+	}
+	return nil, false
+}
+
+type AgentContext struct {
+	AgentID    string       `json:"agentId"`
+	Role       string       `json:"role"`
+	TaskID     string       `json:"taskId,omitempty"`
+	Tasks      []string     `json:"tasks"`
+	Round      int          `json:"round"`
+	WorkDir    string       `json:"workDir"`
+	Messages   [][]types.Message `json:"messages"`
+	IsRunning  bool         `json:"isRunning"`  // 是否正在推論中
+	IsFinished bool         `json:"isFinished"` // 是否已徹底完成所有任務與循環
+	Store      *AppStore    `json:"-"`
 	GetState func(key string) (interface{}, bool) `json:"-"`
 	SetState func(key string, value interface{}) `json:"-"`
 }
 
-func GetOrCreateAgentContext(agentID string, taskID string, workDir string) *AgentContext {
+func GetOrCreateAgentContext(agentID string, taskID string, role string, workDir string) *AgentContext {
 	GlobalAppStore.Lock()
-	agents := GlobalAppStore.state["agents"].(map[string]*AgentContext)
+	agentMap := GlobalAppStore.state["agents"].(map[string]*AgentContext)
 	
-	var ctx *AgentContext
-	if existing, exists := agents[agentID]; exists {
+	var agentContext *AgentContext
+	if existingContext, exists := agentMap[agentID]; exists {
 		if taskID != "" {
-			existing.TaskID = taskID
+			existingContext.TaskID = taskID
 		}
-		ctx = existing
+		if role != "" {
+			existingContext.Role = role
+		}
+		agentContext = existingContext
 	} else {
-		ctx = &AgentContext{
-			AgentID:   agentID,
-			TaskID:    taskID,
-			Tasks:     []string{},
-			Round:     0,
-			WorkDir:   workDir,
-			Messages:  [][]types.Message{{}, {}},
-			IsRunning: false,
-			Store:     GlobalAppStore,
+		agentContext = &AgentContext{
+			AgentID:    agentID,
+			Role:       role,
+			TaskID:     taskID,
+			Tasks:      []string{},
+			Round:      0,
+			WorkDir:    workDir,
+			Messages:   [][]types.Message{{}, {}},
+			IsRunning:  false,
+			IsFinished: false,
+			Store:      GlobalAppStore,
 		}
-		agents[agentID] = ctx
+		agentMap[agentID] = agentContext
 	}
 	GlobalAppStore.Unlock()
 	
-	ctx.bindStateFunctions()
-	return ctx
+	agentContext.bindStateFunctions()
+	return agentContext
 }
 
-func (ctx *AgentContext) bindStateFunctions() {
-	if ctx.TaskID == "" {
-		ctx.GetState = ctx.Store.GetState
-		ctx.SetState = ctx.Store.SetState
+func (agentContext *AgentContext) bindStateFunctions() {
+	if agentContext.TaskID == "" {
+		agentContext.GetState = agentContext.Store.GetState
+		agentContext.SetState = agentContext.Store.SetState
 	} else {
-		ctx.GetState = func(key string) (interface{}, bool) {
-			ctx.Store.RLock()
-			defer ctx.Store.RUnlock()
-			tasks := ctx.Store.state["tasks"].(map[string]*types.Task)
-			task, exists := tasks[ctx.TaskID]
+		agentContext.GetState = func(key string) (interface{}, bool) {
+			agentContext.Store.RLock()
+			defer agentContext.Store.RUnlock()
+			taskMap := agentContext.Store.state["tasks"].(map[string]*types.Task)
+			task, exists := taskMap[agentContext.TaskID]
 			if !exists { return nil, false }
 			
 			switch key {
@@ -168,23 +188,23 @@ func (ctx *AgentContext) bindStateFunctions() {
 			case "progress": return task.Progress, true
 			default:
 				if task.State == nil { return nil, false }
-				val, ok := task.State[key]
-				return val, ok
+				value, isSuccessful := task.State[key]
+				return value, isSuccessful
 			}
 		}
 		
-		ctx.SetState = func(key string, value interface{}) {
-			ctx.Store.Lock()
-			defer ctx.Store.Unlock()
-			tasks := ctx.Store.state["tasks"].(map[string]*types.Task)
-			task, exists := tasks[ctx.TaskID]
+		agentContext.SetState = func(key string, value interface{}) {
+			agentContext.Store.Lock()
+			defer agentContext.Store.Unlock()
+			taskMap := agentContext.Store.state["tasks"].(map[string]*types.Task)
+			task, exists := taskMap[agentContext.TaskID]
 			if !exists { return }
 			
 			switch key {
 			case "status": 
-				if s, ok := value.(types.TaskStatus); ok { task.Status = s }
+				if status, isOk := value.(types.TaskStatus); isOk { task.Status = status }
 			case "progress":
-				if p, ok := value.(int); ok { task.Progress = p }
+				if progress, isOk := value.(int); isOk { task.Progress = progress }
 			default:
 				if task.State == nil { task.State = make(map[string]interface{}) }
 				task.State[key] = value
@@ -194,40 +214,42 @@ func (ctx *AgentContext) bindStateFunctions() {
 	}
 }
 
-func (ctx *AgentContext) SyncState() {
-	if ctx.ParentCtx != nil {
-		ctx.ParentCtx.UpdateTaskStateWithContext(ctx.TaskID, ctx)
+func (agentContext *AgentContext) SyncState() {
+	if agentContext.TaskID != "" {
+		if parentCtx, exists := agentContext.Store.GetParentContext(agentContext.TaskID); exists {
+			parentCtx.UpdateTaskStateWithContext(agentContext.TaskID, agentContext)
+		}
 	}
-	ctx.Store.Lock()
-	defer ctx.Store.Unlock()
-	agents := ctx.Store.state["agents"].(map[string]*AgentContext)
-	agents[ctx.AgentID] = ctx
+	agentContext.Store.Lock()
+	defer agentContext.Store.Unlock()
+	agentMap := agentContext.Store.state["agents"].(map[string]*AgentContext)
+	agentMap[agentContext.AgentID] = agentContext
 }
 
-func (ctx *AgentContext) GetMessages() [][]types.Message {
-	if ctx.TaskID != "" {
-		ctx.Store.RLock()
-		defer ctx.Store.RUnlock()
-		tasks := ctx.Store.state["tasks"].(map[string]*types.Task)
-		if task, exists := tasks[ctx.TaskID]; exists {
+func (agentContext *AgentContext) GetMessages() [][]types.Message {
+	if agentContext.TaskID != "" {
+		agentContext.Store.RLock()
+		defer agentContext.Store.RUnlock()
+		taskMap := agentContext.Store.state["tasks"].(map[string]*types.Task)
+		if task, exists := taskMap[agentContext.TaskID]; exists {
 			return task.Messages
 		}
 	}
-	return ctx.Messages
+	return agentContext.Messages
 }
 
-func (ctx *AgentContext) UpdateTaskState(status types.TaskStatus, progress int) {
-	ctx.SetState("status", status)
-	ctx.SetState("progress", progress)
+func (agentContext *AgentContext) UpdateTaskState(status types.TaskStatus, progress int) {
+	agentContext.SetState("status", status)
+	agentContext.SetState("progress", progress)
 }
 
-func (ctx *AgentContext) IsAllTasksCompleted() bool {
-	ctx.Store.RLock()
-	defer ctx.Store.RUnlock()
-	tasks := ctx.Store.state["tasks"].(map[string]*types.Task)
+func (agentContext *AgentContext) IsAllTasksCompleted() bool {
+	agentContext.Store.RLock()
+	defer agentContext.Store.RUnlock()
+	taskMap := agentContext.Store.state["tasks"].(map[string]*types.Task)
 	
-	for _, taskID := range ctx.Tasks {
-		if task, exists := tasks[taskID]; exists {
+	for _, taskID := range agentContext.Tasks {
+		if task, exists := taskMap[taskID]; exists {
 			if task.Status != types.StatusCompleted && task.Status != types.StatusError {
 				return false
 			}
@@ -236,22 +258,22 @@ func (ctx *AgentContext) IsAllTasksCompleted() bool {
 	return true
 }
 
-func (ctx *AgentContext) UpdateTaskStateWithContext(taskID string, subCtx *AgentContext) {
-	ctx.Store.Lock()
-	defer ctx.Store.Unlock()
-	tasks := ctx.Store.state["tasks"].(map[string]*types.Task)
-	if task, exists := tasks[taskID]; exists {
+func (agentContext *AgentContext) UpdateTaskStateWithContext(taskID string, subContext *AgentContext) {
+	agentContext.Store.Lock()
+	defer agentContext.Store.Unlock()
+	taskMap := agentContext.Store.state["tasks"].(map[string]*types.Task)
+	if task, exists := taskMap[taskID]; exists {
 		task.UpdatedAt = time.Now()
-		task.Data = subCtx
+		task.Data = subContext
 	}
 }
 
-func (ctx *AgentContext) AddMessage(role string, message types.Message) {
-	if ctx.TaskID != "" {
-		ctx.Store.Lock()
-		defer ctx.Store.Unlock()
-		tasks := ctx.Store.state["tasks"].(map[string]*types.Task)
-		if task, exists := tasks[ctx.TaskID]; exists {
+func (agentContext *AgentContext) AddMessage(role string, message types.Message) {
+	if agentContext.TaskID != "" {
+		agentContext.Store.Lock()
+		defer agentContext.Store.Unlock()
+		taskMap := agentContext.Store.state["tasks"].(map[string]*types.Task)
+		if task, exists := taskMap[agentContext.TaskID]; exists {
 			if role == "user" || role == "tool" {
 				task.Messages[0] = append(task.Messages[0], message)
 			} else {
@@ -263,8 +285,8 @@ func (ctx *AgentContext) AddMessage(role string, message types.Message) {
 	}
 	
 	if role == "user" || role == "tool" {
-		ctx.Messages[0] = append(ctx.Messages[0], message)
+		agentContext.Messages[0] = append(agentContext.Messages[0], message)
 	} else {
-		ctx.Messages[1] = append(ctx.Messages[1], message)
+		agentContext.Messages[1] = append(agentContext.Messages[1], message)
 	}
 }

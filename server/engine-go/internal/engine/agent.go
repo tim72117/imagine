@@ -30,15 +30,15 @@ var GlobalAgentLoader = NewAgentLoader("../.agent")
  */
 func NewAgent(roleType string, toolsConfig *ToolsConfig, aiProvider provider.AIProvider) *Agent {
 	// 嚴格從 .agent 檔案載入定義
-	agentDef, err := GlobalAgentLoader.GetAgent(roleType)
+	agentDefinition, errorValue := GlobalAgentLoader.GetAgent(roleType)
 	
 	systemPrompt := ""
 	allowedTools := []string{}
 
-	if err == nil {
+	if errorValue == nil {
 		fmt.Printf("  [Agent] 📂 已載入定義檔: %s.agent\n", roleType)
-		systemPrompt = agentDef.Thought
-		allowedTools = agentDef.Tools
+		systemPrompt = agentDefinition.Thought
+		allowedTools = agentDefinition.Tools
 	} else {
 		fmt.Printf("  [Agent] ⚠️ 找不到定義檔 %s.agent，Prompt 將維持為空。\n", roleType)
 	}
@@ -87,6 +87,14 @@ func (agent *Agent) Run(agentContext *AgentContext, allDeclarations map[string]i
 			// 同步當前狀態到 Store
 			agentContext.SyncState()
 			
+			// 核心檢查：如果尚有子任務未完成，應暫停推論循環，進入等待狀態
+			if len(agentContext.Tasks) > 0 && !agentContext.IsAllTasksCompleted() {
+				fmt.Printf("  [%s] ⏳ 尚有子任務未完成，暫停推論，進入等待狀態 (Total Tasks: %d)\n", agent.RoleName, len(agentContext.Tasks))
+				agentContext.SetState("status", types.StatusWaiting)
+				agentContext.SyncState()
+				break
+			}
+
 			currentRound := agentContext.Round + 1
 			fmt.Printf("  [%s] 🔄 第 %d 輪循環啟動\n", agent.RoleName, currentRound)
 
@@ -105,7 +113,7 @@ func (agent *Agent) Run(agentContext *AgentContext, allDeclarations map[string]i
 			}
 
 			// 2. 準備環境資訊
-			envInfo := fmt.Sprintf("【目前工作目錄】：%s", func() string {
+			environmentInfo := fmt.Sprintf("【目前工作目錄】：%s", func() string {
 				if agentContext.WorkDir == "" {
 					return "未定義"
 				}
@@ -113,23 +121,23 @@ func (agent *Agent) Run(agentContext *AgentContext, allDeclarations map[string]i
 			}())
 
 			// 3. 組裝指令 (Prompt Only)
-			instruction, err := BuildInferenceParameters(
+			instruction, errorValue := BuildInferenceParameters(
 				agent.SystemPrompt,
 				agent.ToolPrompt,
-				envInfo,
+				environmentInfo,
 				userMessages,
 				assistantMessages,
 			)
 
-			if err != nil {
-				resultEvents <- types.AIEvent{Type: "error", Text: err.Error()}
+			if errorValue != nil {
+				resultEvents <- types.AIEvent{Type: "error", Text: errorValue.Error()}
 				break
 			}
 
 			// 3. 在 Agent 中執行推論啟動
-			rawEvents, err := agent.Provider.GenerateStream(context.Background(), instruction, options)
-			if err != nil {
-				resultEvents <- types.AIEvent{Type: "error", Text: err.Error()}
+			rawEventStream, errorValue := agent.Provider.GenerateStream(context.Background(), instruction, options)
+			if errorValue != nil {
+				resultEvents <- types.AIEvent{Type: "error", Text: errorValue.Error()}
 				break
 			}
 
@@ -137,28 +145,28 @@ func (agent *Agent) Run(agentContext *AgentContext, allDeclarations map[string]i
 			toolCalledThisRound := false
 			currentAssistantMessage := PrepareNextRoundMessage()
 
-			for event := range rawEvents {
-				if event.Type == "action" && event.Action != nil {
+			for streamEvent := range rawEventStream {
+				if streamEvent.Type == "action" && streamEvent.Action != nil {
 					toolCalledThisRound = true
 					
 					// 紀錄 Function Call
 					currentAssistantMessage.Parts = append(currentAssistantMessage.Parts, types.Part{
 						FunctionCall: &types.FunctionCall{
-							Name: event.Action.Name,
-							Args: event.Action.Args,
+							Name: streamEvent.Action.Name,
+							Args: streamEvent.Action.Args,
 						},
 					})
 
 					// 發送 Action 事件 (先讓觀察者知道意圖)
-					resultEvents <- event
+					resultEvents <- streamEvent
 
 					// 調派執行：由 Toolbox 決定同步或非同步
-					args, _ := event.Action.Args.(map[string]interface{})
-					agent.Toolbox.Dispatch(event.Action.Name, args, agentContext, allDeclarations, resultEvents)
+					arguments, _ := streamEvent.Action.Args.(map[string]interface{})
+					agent.Toolbox.Dispatch(streamEvent.Action.Name, arguments, agentContext, allDeclarations, resultEvents)
 
-				} else if event.Type == "chunk" {
-					currentAssistantMessage.Parts = append(currentAssistantMessage.Parts, types.Part{Text: event.Text})
-					resultEvents <- event
+				} else if streamEvent.Type == "chunk" {
+					currentAssistantMessage.Parts = append(currentAssistantMessage.Parts, types.Part{Text: streamEvent.Text})
+					resultEvents <- streamEvent
 				}
 			}
 
@@ -174,22 +182,13 @@ func (agent *Agent) Run(agentContext *AgentContext, allDeclarations map[string]i
 				// 1. 標記當前任務為完成
 				agentContext.SetState("status", types.StatusCompleted)
 				agentContext.SetState("progress", 100)
-				agentContext.SyncState()
 
-				// 2. 如果是子代理，檢查父代理的所有任務是否皆已完成
-				if agentContext.ParentCtx != nil {
-					if agentContext.ParentCtx.IsAllTasksCompleted() {
-						fmt.Printf("  [%s] 🔔 所有子任務已完成，通知父代理 (%s) 繼續...\n", agent.RoleName, agentContext.ParentCtx.AgentID)
-						GlobalCommandQueue <- types.Message{
-							Role:    "system",
-							Text:    fmt.Sprintf("所有子任務已完成，請根據結果匯總進度。最後完成者: %s", agent.RoleName),
-							Time:    time.Now().UnixMilli(),
-							AgentID: agentContext.ParentCtx.AgentID,
-							TaskID:  agentContext.ParentCtx.TaskID,
-						}
-					}
+				// 如果此時所有子任務也已完結，則標記 AgentContext 為徹底完成
+				if agentContext.IsAllTasksCompleted() {
+					agentContext.IsFinished = true
 				}
 
+				agentContext.SyncState()
 				break
 			}
 		}

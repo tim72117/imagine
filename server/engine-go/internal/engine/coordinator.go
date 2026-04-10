@@ -39,6 +39,58 @@ func (coordinator *Coordinator) Start(aiProvider provider.AIProvider, toolsConfi
 
 	fmt.Println("[Coordinator] 🛰️ Go 版背景監聽器已啟動...")
 
+	// 1. 訂閱非同步工具完成事件
+	GlobalEventBus.Subscribe("asynchronousTool.finished", func(payload interface{}) {
+		eventData, isSuccessful := payload.(map[string]interface{})
+		if !isSuccessful {
+			return
+		}
+		
+		agentID, _ := eventData["agentId"].(string)
+		taskID, _ := eventData["taskId"].(string)
+		toolName, _ := eventData["toolName"].(string)
+		
+		var agentRole string
+		GlobalAppStore.RLock()
+		if agentMap, ok := GlobalAppStore.state["agents"].(map[string]*AgentContext); ok {
+			if ctx, exists := agentMap[agentID]; exists {
+				agentRole = ctx.Role
+			}
+		}
+		GlobalAppStore.RUnlock()
+
+		GlobalCommandQueue <- types.Message{
+			Role:      "system",
+			AgentRole: agentRole,
+			Text:      fmt.Sprintf("工具 %s 已執行完畢，請根據結果繼續推論。", toolName),
+			Time:      time.Now().UnixMilli(),
+			AgentID:   agentID,
+			TaskID:    taskID,
+		}
+	})
+
+	// 2. 訂閱 Agent 結束事件 (維持發送 TASK_COMPLETED 協議不變)
+	GlobalEventBus.Subscribe("agent.finished", func(payload interface{}) {
+		eventData, isSuccessful := payload.(map[string]interface{})
+		if !isSuccessful {
+			return
+		}
+		
+		agentID, _ := eventData["agentId"].(string)
+		taskID, _ := eventData["taskId"].(string)
+		isFinished, _ := eventData["isFinished"].(bool)
+		
+		if taskID != "" && isFinished {
+			GlobalCommandQueue <- types.Message{
+				Role:    "system",
+				Text:    fmt.Sprintf("TASK_COMPLETED:ID=%s", taskID),
+				Time:    time.Now().UnixMilli(),
+				AgentID: agentID,
+				TaskID:  taskID,
+			}
+		}
+	})
+
 	go func() {
 		for message := range GlobalCommandQueue {
 			coordinator.mutex.Lock()
@@ -46,60 +98,70 @@ func (coordinator *Coordinator) Start(aiProvider provider.AIProvider, toolsConfi
 			coordinator.mutex.Unlock()
 
 			fmt.Printf("[Coordinator] ⚡️ 偵測到指令: %s\n", message.Text)
+			
+			// 統一入口：所有訊息 (含結案協議) 都直接進入 ProcessNextBatch
 			coordinator.dispatch(aiProvider, toolsConfig, message)
 		}
 	}()
 }
 
+/**
+ * dispatch 處理根代理人與任何訊息的進入點
+ */
 func (coordinator *Coordinator) dispatch(aiProvider provider.AIProvider, toolsConfig *ToolsConfig, message types.Message) {
-	role := coordinator.determineRole(message)
-	if role != "coordinator" {
-		fmt.Printf("[Coordinator] 🚀 正在調派 Worker 角色: %s\n", role)
-	}
-
-	coordinator.ProcessNextBatch(aiProvider, toolsConfig, role, message.AgentID, message.TaskID, message.ParentAgentID, message)
-}
-
-func (coordinator *Coordinator) determineRole(message types.Message) string {
-	if strings.HasPrefix(message.Text, "SPAWN:") {
-		parts := strings.Split(message.Text, ":")
-		for _, part := range parts {
-			if strings.HasPrefix(part, "ROLE=") {
-				return strings.TrimPrefix(part, "ROLE=")
-			}
+	agentRole := message.AgentRole
+	if agentRole == "" {
+		if message.TaskID != "" {
+			agentRole = "worker"
+		} else {
+			agentRole = "coordinator"
 		}
 	}
-	return "coordinator"
+	coordinator.ProcessNextBatch(aiProvider, toolsConfig, agentRole, message.AgentID, message.TaskID, message)
 }
 
 func (coordinator *Coordinator) Submit(userPrompt string) {
 	agentID := GenerateID("AGENT")
-	
 	GlobalCommandQueue <- types.Message{
-		Role:    "user",
-		Text:    userPrompt,
-		Time:    time.Now().UnixMilli(),
-		AgentID: agentID,
+		Role:      "user",
+		AgentRole: "coordinator",
+		Text:      userPrompt,
+		Time:      time.Now().UnixMilli(),
+		AgentID:   agentID,
 	}
 }
 
 /**
- * ProcessNextBatch 啟動代理人執行任務
+ * ProcessNextBatch 現在負責執行推論與「結案審核」
  */
-func (coordinator *Coordinator) ProcessNextBatch(aiProvider provider.AIProvider, toolsConfig *ToolsConfig, role string, agentID string, taskID string, parentAgentID string, originalMsg types.Message) {
+func (coordinator *Coordinator) ProcessNextBatch(aiProvider provider.AIProvider, toolsConfig *ToolsConfig, role string, agentID string, taskID string, originalMessage types.Message) {
 	
-	// 1. 確保 AgentID 存在
+	// [結案處理] 如果訊息是結案通知，執行層級檢查判斷是否喚醒父代
+	if strings.HasPrefix(originalMessage.Text, "TASK_COMPLETED:") {
+		parentContext, exists := GlobalAppStore.GetParentContext(taskID)
+		if exists && parentContext.IsAllTasksCompleted() {
+			fmt.Printf("[Coordinator] 🔔 雇主 (%s) 的所有子任務全數完成，發送喚醒通知。\n", parentContext.AgentID)
+			GlobalCommandQueue <- types.Message{
+				Role:      "system",
+				AgentRole: parentContext.Role,
+				Text:      "所有子任務已完成，請匯總進度。",
+				Time:      time.Now().UnixMilli(),
+				AgentID:   parentContext.AgentID,
+				TaskID:    parentContext.TaskID,
+			}
+		}
+		// 結案訊息處理完畢，不進入後續推論
+		return
+	}
+
 	if agentID == "" {
 		agentID = GenerateID("AGENT")
 	}
 
-	// 2. 併發防護：使用 Store 層級的原子鎖 (TryLockAgent)
-	// 如果 Agent 已經在運行中，則將命令「延後」重新入隊
 	if !GlobalAppStore.TryLockAgent(agentID) {
-		fmt.Printf("[Coordinator] ⏳ Agent (%s) 忙碌中，將指令延後處理...\n", agentID)
 		go func() {
-			time.Sleep(2 * time.Second) // 延遲後重新入隊
-			GlobalCommandQueue <- originalMsg
+			time.Sleep(2 * time.Second)
+			GlobalCommandQueue <- originalMessage
 		}()
 		return
 	}
@@ -109,22 +171,9 @@ func (coordinator *Coordinator) ProcessNextBatch(aiProvider provider.AIProvider,
 	copy(history, coordinator.messages)
 	coordinator.mutex.RUnlock()
 
-	if role == "" {
-		role = "explorer"
-	}
-
 	agent := NewAgent(role, toolsConfig, aiProvider)
-	wd, _ := os.Getwd()
-	agentContext := GetOrCreateAgentContext(agentID, taskID, wd)
-	
-	if parentAgentID != "" {
-		GlobalAppStore.RLock()
-		agents := GlobalAppStore.state["agents"].(map[string]*AgentContext)
-		if parentCtx, exists := agents[parentAgentID]; exists {
-			agentContext.ParentCtx = parentCtx
-		}
-		GlobalAppStore.RUnlock()
-	}
+	workingDirectory, _ := os.Getwd()
+	agentContext := GetOrCreateAgentContext(agentID, taskID, role, workingDirectory)
 
 	if agentContext.Round == 0 {
 		for _, message := range history {
@@ -135,9 +184,8 @@ func (coordinator *Coordinator) ProcessNextBatch(aiProvider provider.AIProvider,
 	}
 
 	fmt.Printf("[Coordinator] 🚀 啟動 Agent (%s) 推論循環...\n", agentID)
-	eventStream, errorVal := agent.Run(agentContext, toolsConfig.Declarations)
-	if errorVal != nil {
-		fmt.Printf("[Coordinator] ❌ 執行錯誤: %v\n", errorVal)
+	eventStream, errorValue := agent.Run(agentContext, toolsConfig.Declarations)
+	if errorValue != nil {
 		GlobalAppStore.UnlockAgent(agentID)
 		return
 	}
@@ -146,15 +194,15 @@ func (coordinator *Coordinator) ProcessNextBatch(aiProvider provider.AIProvider,
 		for event := range eventStream {
 			if event.Type == "chunk" {
 				fmt.Print(event.Text)
-			} else if event.Type == "action" {
-				fmt.Printf("\n[%s] 🔧 正在執行工具: %s\n", role, event.Action.Name)
-			} else if event.Type == "tool_result" {
-				fmt.Printf("\n[%s] ✅ 工具執行結果: %s\n", role, event.Text)
 			}
 		}
-		fmt.Printf("\n[%s] ✨ 任務階段性處理完成。\n", role)
-		
-		// 完畢後釋放鎖定
 		GlobalAppStore.UnlockAgent(agentID)
+
+		GlobalEventBus.Publish("agent.finished", map[string]interface{}{
+			"agentId":    agentID,
+			"role":       role,
+			"taskId":     taskID,
+			"isFinished": agentContext.IsFinished,
+		})
 	}()
 }

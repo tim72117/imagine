@@ -13,7 +13,7 @@ import (
 /**
  * ToolHandler 定義工具執行的函式原型
  */
-type ToolHandler func(args map[string]interface{}, ctx *AgentContext) (types.ActionResult, error)
+type ToolHandler func(arguments map[string]interface{}, agentContext *AgentContext) (types.ActionResult, error)
 
 /**
  * Toolbox 負責管理工具的註冊與執行，對應 TS 中的 Toolbox
@@ -38,7 +38,7 @@ func (toolbox *Toolbox) Register(name string, handler ToolHandler) {
 /**
  * ExecuteTool 執行指定的工具，並自動處理狀態更新與紀錄
  */
-func (toolbox *Toolbox) ExecuteTool(name string, args map[string]interface{}, agentContext *AgentContext) types.ActionResult {
+func (toolbox *Toolbox) ExecuteTool(name string, arguments map[string]interface{}, agentContext *AgentContext) types.ActionResult {
 	handler, exists := toolbox.handlers[name]
 	if !exists {
 		return types.ActionResult{Success: false, Error: fmt.Sprintf("Tool %s not found", name)}
@@ -49,9 +49,9 @@ func (toolbox *Toolbox) ExecuteTool(name string, args map[string]interface{}, ag
 	agentContext.SetState("progress", 0)
 
 	// 執行工具邏輯
-	result, err := handler(args, agentContext)
-	if err != nil {
-		result = types.ActionResult{Success: false, Error: err.Error()}
+	result, errorValue := handler(arguments, agentContext)
+	if errorValue != nil {
+		result = types.ActionResult{Success: false, Error: errorValue.Error()}
 	}
 
 	// 轉化結果為字串紀錄
@@ -76,11 +76,11 @@ func (toolbox *Toolbox) ExecuteTool(name string, args map[string]interface{}, ag
 /**
  * Dispatch 根據工具類型決定同步或非同步執行，並處理事件發送
  */
-func (toolbox *Toolbox) Dispatch(name string, args map[string]interface{}, agentContext *AgentContext, allDeclarations map[string]interface{}, eventChan chan<- types.AIEvent) {
+func (toolbox *Toolbox) Dispatch(name string, arguments map[string]interface{}, agentContext *AgentContext, allDeclarations map[string]interface{}, eventChan chan<- types.AIEvent) {
 	// 1. 判定工具類型
 	isAsync := false
 	if declaration, exists := allDeclarations[name].(map[string]interface{}); exists {
-		if toolType, ok := declaration["type"].(string); ok && toolType == "async" {
+		if toolType, isOk := declaration["type"].(string); isOk && toolType == "async" {
 			isAsync = true
 		}
 	}
@@ -99,11 +99,11 @@ func (toolbox *Toolbox) Dispatch(name string, args map[string]interface{}, agent
 
 		// B. 在背景執行實際邏輯
 		go func() {
-			eventChan <- RunAsyncTool(agentContext, name, args)
+			eventChan <- RunAsyncTool(agentContext, name, arguments)
 		}()
 	} else {
 		// --- 同步模式 ---
-		eventChan <- RunAsyncTool(agentContext, name, args)
+		eventChan <- RunAsyncTool(agentContext, name, arguments)
 	}
 }
 
@@ -125,24 +125,24 @@ func resolvePath(workDir, inputPath string) string {
  */
 func init() {
 	// list_files: 列出檔案
-	listFilesHandler := func(args map[string]interface{}, ctx *AgentContext) (types.ActionResult, error) {
-		pathArg, _ := args["path"].(string)
-		finalPath := resolvePath(ctx.WorkDir, pathArg)
+	listFilesHandler := func(arguments map[string]interface{}, agentContext *AgentContext) (types.ActionResult, error) {
+		pathArg, _ := arguments["path"].(string)
+		finalPath := resolvePath(agentContext.WorkDir, pathArg)
 
-		entries, err := os.ReadDir(finalPath)
-		if err != nil {
-			return types.ActionResult{Success: false, Error: err.Error()}, nil
+		directoryEntries, errorValue := os.ReadDir(finalPath)
+		if errorValue != nil {
+			return types.ActionResult{Success: false, Error: errorValue.Error()}, nil
 		}
 
 		var fileNames []string
-		for _, f := range entries {
-			fileNames = append(fileNames, f.Name())
+		for _, file := range directoryEntries {
+			fileNames = append(fileNames, file.Name())
 		}
 
 		data := map[string]interface{}{
 			"files":       fileNames,
 			"path":        pathArg,
-			"explanation": args["explanation"],
+			"explanation": arguments["explanation"],
 		}
 		return types.ActionResult{Success: true, Data: data}, nil
 	}
@@ -151,71 +151,71 @@ func init() {
 	GlobalToolbox.Register("list_files_async", listFilesHandler)
 
 	// read_file_content: 讀取檔案內容
-	GlobalToolbox.Register("read_file_content", func(args map[string]interface{}, ctx *AgentContext) (types.ActionResult, error) {
-		pathArg, _ := args["path"].(string)
-		finalPath := resolvePath(ctx.WorkDir, pathArg)
+	GlobalToolbox.Register("read_file_content", func(arguments map[string]interface{}, agentContext *AgentContext) (types.ActionResult, error) {
+		pathArg, _ := arguments["path"].(string)
+		finalPath := resolvePath(agentContext.WorkDir, pathArg)
 
-		content, err := os.ReadFile(finalPath)
-		if err != nil {
-			return types.ActionResult{Success: false, Error: err.Error()}, nil
+		content, errorValue := os.ReadFile(finalPath)
+		if errorValue != nil {
+			return types.ActionResult{Success: false, Error: errorValue.Error()}, nil
 		}
 
 		data := map[string]interface{}{
 			"content":     string(content),
 			"path":        pathArg,
-			"explanation": args["explanation"],
+			"explanation": arguments["explanation"],
 		}
 		return types.ActionResult{Success: true, Data: data}, nil
 	})
 
 	// update_file: 更新或建立檔案
-	GlobalToolbox.Register("update_file", func(args map[string]interface{}, ctx *AgentContext) (types.ActionResult, error) {
-		pathArg, _ := args["path"].(string)
-		codeArg, _ := args["code"].(string)
-		finalPath := resolvePath(ctx.WorkDir, pathArg)
+	GlobalToolbox.Register("update_file", func(arguments map[string]interface{}, agentContext *AgentContext) (types.ActionResult, error) {
+		pathArg, _ := arguments["path"].(string)
+		codeArg, _ := arguments["code"].(string)
+		finalPath := resolvePath(agentContext.WorkDir, pathArg)
 
 		// 確保目錄存在
-		dir := filepath.Dir(finalPath)
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			return types.ActionResult{Success: false, Error: err.Error()}, nil
+		directory := filepath.Dir(finalPath)
+		if errorValue := os.MkdirAll(directory, 0755); errorValue != nil {
+			return types.ActionResult{Success: false, Error: errorValue.Error()}, nil
 		}
 
 		// 寫入檔案
-		if err := os.WriteFile(finalPath, []byte(codeArg), 0644); err != nil {
-			return types.ActionResult{Success: false, Error: err.Error()}, nil
+		if errorValue := os.WriteFile(finalPath, []byte(codeArg), 0644); errorValue != nil {
+			return types.ActionResult{Success: false, Error: errorValue.Error()}, nil
 		}
 
 		data := map[string]interface{}{
 			"path":        finalPath,
-			"explanation": args["explanation"],
+			"explanation": arguments["explanation"],
 		}
 		return types.ActionResult{Success: true, Data: data}, nil
 	})
 
 	// plan: 任務規劃
-	GlobalToolbox.Register("plan", func(args map[string]interface{}, ctx *AgentContext) (types.ActionResult, error) {
+	GlobalToolbox.Register("plan", func(arguments map[string]interface{}, agentContext *AgentContext) (types.ActionResult, error) {
 		return types.ActionResult{
 			Success: true,
 			Data: map[string]interface{}{
-				"analysis":   args["analysis"],
-				"next_steps": args["next_steps_plan"],
+				"analysis":   arguments["analysis"],
+				"next_steps": arguments["next_steps_plan"],
 			},
 		}, nil
 	})
 
 	// spawn_workers: 派發工作
-	GlobalToolbox.Register("spawn_workers", func(args map[string]interface{}, agentContext *AgentContext) (types.ActionResult, error) {
-		workers, ok := args["workers"].([]interface{})
-		if !ok {
+	GlobalToolbox.Register("spawn_workers", func(arguments map[string]interface{}, agentContext *AgentContext) (types.ActionResult, error) {
+		workers, isOk := arguments["workers"].([]interface{})
+		if !isOk {
 			return types.ActionResult{Success: false, Error: "缺少 workers 參數"}, nil
 		}
 
-		explanation, _ := args["explanation"].(string)
+		explanation, _ := arguments["explanation"].(string)
 		
-		var spawnedTasks []string
+		var spawnedTaskDescriptions []string
 		for _, workerItem := range workers {
-			worker, ok := workerItem.(map[string]interface{})
-			if !ok {
+			worker, isOk := workerItem.(map[string]interface{})
+			if !isOk {
 				continue
 			}
 
@@ -227,29 +227,29 @@ func init() {
 			agentContext.Tasks = append(agentContext.Tasks, taskID)
 			
 			// 建立子任務實體
-			CreateTaskWithID(taskID, role, agentContext.AgentID)
+			CreateTaskWithID(taskID, role)
 
 			// 2. 產生此 Worker 的專屬 AgentID
 			workerAgentID := GenerateID("AGENT")
 
-			// 3. 提交到全域隊列，攜帶 AgentID 與 TaskID 以及 ParentAgentID
+			// 3. 提交到全域隊列
 			GlobalCommandQueue <- types.Message{
-				Role:          "system",
-				Text:          fmt.Sprintf("SPAWN:ROLE=%s:TASK=%s", role, taskDesc),
-				Time:          time.Now().UnixMilli(),
-				AgentID:       workerAgentID,
-				TaskID:        taskID,
-				ParentAgentID: agentContext.AgentID,
+				Role:      "system",
+				AgentRole: role,
+				Text:      fmt.Sprintf("SPAWN:TASK=%s", taskDesc),
+				Time:      time.Now().UnixMilli(),
+				AgentID:   workerAgentID,
+				TaskID:    taskID,
 			}
 
-			spawnedTasks = append(spawnedTasks, fmt.Sprintf("%s (%s) [ID: %s]", role, taskDesc, taskID))
+			spawnedTaskDescriptions = append(spawnedTaskDescriptions, fmt.Sprintf("%s (%s) [ID: %s]", role, taskDesc, taskID))
 		}
 
 		return types.ActionResult{
 			Success: true,
 			Data: map[string]interface{}{
 				"explanation": explanation,
-				"spawned":     spawnedTasks,
+				"spawned":     spawnedTaskDescriptions,
 			},
 		}, nil
 	})
@@ -257,15 +257,14 @@ func init() {
 
 /**
  * RunAsyncTool 模擬 TS 版的 runAsyncTool，執行工具並處理狀態同步與事件發送
- * 在 Go 中，我們透過回傳 AIEvent 串流或直接回傳結果來達成
  */
-func RunAsyncTool(agentContext *AgentContext, toolName string, args map[string]interface{}) types.AIEvent {
+func RunAsyncTool(agentContext *AgentContext, toolName string, arguments map[string]interface{}) types.AIEvent {
 	// 1. 同步狀態 (可選：模擬進入執行狀態)
 	agentContext.SetState("status", types.StatusActive)
 	agentContext.SetState("progress", 50)
 
 	// 2. 透過 Toolbox 執行工具
-	result := GlobalToolbox.ExecuteTool(toolName, args, agentContext)
+	result := GlobalToolbox.ExecuteTool(toolName, arguments, agentContext)
 
 	// 3. 封裝成 AIEvent 回傳
 	resultDescription := fmt.Sprintf("[%s] 執行完成", toolName)
@@ -282,18 +281,18 @@ func RunAsyncTool(agentContext *AgentContext, toolName string, args map[string]i
 		},
 	}
 
-	// 4. (核心改動) 任務完成後，通知 Coordinator 重新啟動
-	// 增加 3 秒延遲以觀察非同步效果
-	fmt.Printf("[%s] (Debug) 期待 3 秒後觸發下一輪...\n", toolName)
+	// 4. (核心改動) 工具完成後僅廣播事件，不再直接干涉調度隊列
+	fmt.Printf("[%s] (Debug) 期待 5 秒後廣播完成事件...\n", toolName)
 	go func() {
 		time.Sleep(5 * time.Second)
-		GlobalCommandQueue <- types.Message{
-			Role:    "system",
-			Text:    fmt.Sprintf("工具 %s 已執行完畢，請根據結果繼續推論。", toolName),
-			Time:    time.Now().UnixMilli(),
-			AgentID: agentContext.AgentID,
-			TaskID:  agentContext.TaskID,
-		}
+
+		// 廣播工具完成事件到全域總線
+		GlobalEventBus.Publish("asynchronousTool.finished", map[string]interface{}{
+			"agentId":  agentContext.AgentID,
+			"taskId":   agentContext.TaskID,
+			"toolName": toolName,
+			"result":   result,
+		})
 	}()
 
 	return event
