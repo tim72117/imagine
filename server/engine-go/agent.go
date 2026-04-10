@@ -107,7 +107,7 @@ func (agent *Agent) Run(agentContext *AgentContext, allDeclarations map[string]i
 				break
 			}
 
-			// 3. 本輪推論與工具執行 (後續 logic 保持不變)
+			// 3. 本輪推論與工具執行
 			toolCalledThisRound := false
 			currentAssistantMessage := PrepareNextRoundMessage()
 
@@ -126,25 +126,9 @@ func (agent *Agent) Run(agentContext *AgentContext, allDeclarations map[string]i
 					// 發送 Action 事件 (先讓觀察者知道意圖)
 					resultEvents <- event
 
-					// 執行工具 (使用 Agent 自己的 Toolbox)
+					// 調派執行：由 Toolbox 決定同步或非同步
 					args, _ := event.Action.Args.(map[string]interface{})
-					result := agent.Toolbox.ExecuteTool(event.Action.Name, args, agentContext)
-					
-					// 準備工具執行結果描述
-					resultDescription := fmt.Sprintf("[%s] 執行完成", event.Action.Name)
-					if !result.Success {
-						resultDescription = fmt.Sprintf("[%s] 執行失敗: %s", event.Action.Name, result.Error)
-					}
-
-					// 發送工具結果事件
-					resultEvents <- AIEvent{
-						Type: "tool_result",
-						Text: resultDescription,
-						Action: &ActionData{
-							Name: event.Action.Name,
-							Args: result.Data,
-						},
-					}
+					agent.Toolbox.Dispatch(event.Action.Name, args, agentContext, allDeclarations, resultEvents)
 
 				} else if event.Type == "chunk" {
 					currentAssistantMessage.Parts = append(currentAssistantMessage.Parts, Part{Text: event.Text})

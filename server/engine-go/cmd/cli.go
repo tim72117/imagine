@@ -16,17 +16,18 @@ func main() {
 	prompt := flag.String("prompt", "", "The prompt to send to AI (fallback if -context is not used)")
 	contextJson := flag.String("context", "", "JSON string containing full agent context (userMessages, assistantMessages, etc.)")
 	roleFlag := flag.String("role", "coordinator", "Role name for tool filtering (optional)")
-	toolsPath := flag.String("tools", "server/tools.json", "Path to tools configuration")
+	toolsPath := flag.String("tools", "server/engine-go/tools.json", "Path to tools configuration")
 	jsonOutput := flag.Bool("json", false, "Output results in JSON format for machines")
 	flag.Parse()
 
 	// 1. 初始化併發控制
 	queue := engine.NewRequestQueue(1, 100*time.Millisecond)
 
-	// 2. 初始化 Provider
+	// 2. 初始化 Provider 與配置
+	settings, _ := engine.LoadSettings("server/engine-go/settings.json")
 	var provider engine.AIProvider
 	if *providerName == "ollama" {
-		provider = engine.NewOllamaProvider("http://localhost:11434", *modelName, queue)
+		provider = engine.NewOllamaProvider(settings.OllamaURL, *modelName, queue)
 	} else {
 		provider = engine.NewGeminiProvider(*modelName, queue)
 	}

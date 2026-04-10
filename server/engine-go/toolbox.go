@@ -29,24 +29,24 @@ func NewToolbox() *Toolbox {
 /**
  * Register 註冊新的工具處理器
  */
-func (t *Toolbox) Register(name string, handler ToolHandler) {
-	t.handlers[name] = handler
+func (toolbox *Toolbox) Register(name string, handler ToolHandler) {
+	toolbox.handlers[name] = handler
 }
 
 /**
  * ExecuteTool 執行指定的工具，並自動處理狀態更新與紀錄
  */
-func (t *Toolbox) ExecuteTool(name string, args map[string]interface{}, ctx *AgentContext) ActionResult {
-	handler, exists := t.handlers[name]
+func (toolbox *Toolbox) ExecuteTool(name string, args map[string]interface{}, agentContext *AgentContext) ActionResult {
+	handler, exists := toolbox.handlers[name]
 	if !exists {
 		return ActionResult{Success: false, Error: fmt.Sprintf("Tool %s not found", name)}
 	}
 
 	// 更新任務狀態
-	ctx.UpdateTaskState(StatusExecutingTool, 0)
+	agentContext.UpdateTaskState(StatusExecutingTool, 0)
 
 	// 執行工具邏輯
-	result, err := handler(args, ctx)
+	result, err := handler(args, agentContext)
 	if err != nil {
 		result = ActionResult{Success: false, Error: err.Error()}
 	}
@@ -59,7 +59,7 @@ func (t *Toolbox) ExecuteTool(name string, args map[string]interface{}, ctx *Age
 	}
 
 	// 將結果存入歷史紀錄
-	ctx.AddMessage("tool", Message{
+	agentContext.AddMessage("tool", Message{
 		Role: "tool",
 		Text: messageText,
 		Time: time.Now().UnixMilli(),
@@ -68,6 +68,40 @@ func (t *Toolbox) ExecuteTool(name string, args map[string]interface{}, ctx *Age
 	})
 
 	return result
+}
+
+/**
+ * Dispatch 根據工具類型決定同步或非同步執行，並處理事件發送
+ */
+func (toolbox *Toolbox) Dispatch(name string, args map[string]interface{}, agentContext *AgentContext, allDeclarations map[string]interface{}, eventChan chan<- AIEvent) {
+	// 1. 判定工具類型
+	isAsync := false
+	if declaration, exists := allDeclarations[name].(map[string]interface{}); exists {
+		if toolType, ok := declaration["type"].(string); ok && toolType == "async" {
+			isAsync = true
+		}
+	}
+
+	if isAsync {
+		// --- 非同步模式 ---
+		// A. 立即發送「已派發」事件
+		eventChan <- AIEvent{
+			Type: "tool_result",
+			Text: fmt.Sprintf("[%s] 任務已成功派發，正在背景執行中...", name),
+			Action: &ActionData{
+				Name: name,
+				Args: map[string]interface{}{"status": "dispatched"},
+			},
+		}
+
+		// B. 在背景執行實際邏輯
+		go func() {
+			eventChan <- RunAsyncTool(agentContext, name, args)
+		}()
+	} else {
+		// --- 同步模式 ---
+		eventChan <- RunAsyncTool(agentContext, name, args)
+	}
 }
 
 // GlobalToolbox 全域工具箱實體
@@ -88,7 +122,7 @@ func resolvePath(workDir, inputPath string) string {
  */
 func init() {
 	// list_files: 列出檔案
-	GlobalToolbox.Register("list_files", func(args map[string]interface{}, ctx *AgentContext) (ActionResult, error) {
+	listFilesHandler := func(args map[string]interface{}, ctx *AgentContext) (ActionResult, error) {
 		pathArg, _ := args["path"].(string)
 		finalPath := resolvePath(ctx.WorkDir, pathArg)
 
@@ -108,7 +142,10 @@ func init() {
 			"explanation": args["explanation"],
 		}
 		return ActionResult{Success: true, Data: data}, nil
-	})
+	}
+
+	GlobalToolbox.Register("list_files", listFilesHandler)
+	GlobalToolbox.Register("list_files_async", listFilesHandler)
 
 	// read_file_content: 讀取檔案內容
 	GlobalToolbox.Register("read_file_content", func(args map[string]interface{}, ctx *AgentContext) (ActionResult, error) {
@@ -173,4 +210,31 @@ func init() {
 			},
 		}, nil
 	})
+}
+
+/**
+ * RunAsyncTool 模擬 TS 版的 runAsyncTool，執行工具並處理狀態同步與事件發送
+ * 在 Go 中，我們透過回傳 AIEvent 串流或直接回傳結果來達成
+ */
+func RunAsyncTool(agentContext *AgentContext, toolName string, args map[string]interface{}) AIEvent {
+	// 1. 同步狀態 (可選：模擬進入執行狀態)
+	agentContext.UpdateTaskState(StatusActive, 50)
+
+	// 2. 透過 Toolbox 執行工具
+	result := GlobalToolbox.ExecuteTool(toolName, args, agentContext)
+
+	// 3. 封裝成 AIEvent 回傳
+	resultDescription := fmt.Sprintf("[%s] 執行完成", toolName)
+	if !result.Success {
+		resultDescription = fmt.Sprintf("[%s] 執行失敗: %s", toolName, result.Error)
+	}
+
+	return AIEvent{
+		Type: "tool_result",
+		Text: resultDescription,
+		Action: &ActionData{
+			Name: toolName,
+			Args: result.Data,
+		},
+	}
 }

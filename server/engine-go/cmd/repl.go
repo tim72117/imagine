@@ -18,7 +18,7 @@ func main() {
 	// 1. 定義 CLI 參數
 	providerName := flag.String("provider", "ollama", "AI provider (gemini or ollama)")
 	modelName := flag.String("model", "gemma4:e4b", "Model name")
-	toolsPath := flag.String("tools", "server/tools.json", "Path to tools.json configuration")
+	toolsPath := flag.String("tools", "server/engine-go/tools.json", "Path to tools.json configuration")
 	flag.Parse()
 
 	fmt.Println("\x1b[36m" + `
@@ -28,11 +28,12 @@ func main() {
     輸入指令來啟動任務，輸入 'exit' 或 'quit' 退出。
     ` + "\x1b[0m")
 
-	// 2. 初始化核心組件
+	// 2. 初始化核心組件與配置
+	settings, _ := engine.LoadSettings("settings.json")
 	queue := engine.NewRequestQueue(1, 100*time.Millisecond)
 	var provider engine.AIProvider
 	if *providerName == "ollama" {
-		provider = engine.NewOllamaProvider("http://localhost:11434", *modelName, queue)
+		provider = engine.NewOllamaProvider(settings.OllamaURL, *modelName, queue)
 	} else {
 		provider = engine.NewGeminiProvider(*modelName, queue)
 	}

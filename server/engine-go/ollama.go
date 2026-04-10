@@ -16,6 +16,10 @@ type OllamaProvider struct {
 }
 
 func NewOllamaProvider(baseURL, model string, queue *RequestQueue) *OllamaProvider {
+	// 移除結尾的斜線以確保路徑拼接正確
+	if len(baseURL) > 0 && baseURL[len(baseURL)-1] == '/' {
+		baseURL = baseURL[:len(baseURL)-1]
+	}
 	return &OllamaProvider{
 		BaseURL:   baseURL,
 		ModelName: model,

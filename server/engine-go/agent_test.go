@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"testing"
 )
 
@@ -60,7 +61,10 @@ func TestAgentSimpleRun(t *testing.T) {
 	var receivedText string
 	for event := range eventStream {
 		if event.Type == "chunk" {
+			fmt.Printf("    [Test] 收到文字數據: %s\n", event.Text)
 			receivedText += event.Text
+		} else if event.Type == "tool_result" {
+			fmt.Printf("    [Test] 收到工具執行結果: %s\n", event.Text)
 		}
 	}
 
@@ -115,6 +119,7 @@ func TestAgentToolExecution(t *testing.T) {
 	// 4. 檢查是否有產生 tool_result 事件
 	toolResultFound := false
 	for event := range eventStream {
+		fmt.Printf("    [Test] 收到事件流: Type=%s, Text=%s\n", event.Type, event.Text)
 		if event.Type == "tool_result" && event.Action.Name == "plan" {
 			toolResultFound = true
 		}

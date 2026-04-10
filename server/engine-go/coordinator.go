@@ -106,17 +106,17 @@ func (coordinator *Coordinator) ProcessNextBatch(provider AIProvider, toolsConfi
 		return
 	}
 
-	// 5. 消耗串流 (在 Go 內部暫時只做列印，未來可對接 SSE 或 WebSocket)
+	// 5. 消耗串流
 	go func() {
 		for event := range eventStream {
 			if event.Type == "chunk" {
 				fmt.Print(event.Text)
 			} else if event.Type == "action" {
-				fmt.Printf("\n[Coordinator] 🔧 Agent 正在執行工具: %s\n", event.Action.Name)
+				fmt.Printf("\n[%s] 🔧 正在執行工具: %s\n", role, event.Action.Name)
 			} else if event.Type == "tool_result" {
-				fmt.Printf("\n[Coordinator] ✅ 工具執行結果: %s\n", event.Text)
+				fmt.Printf("\n[%s] ✅ 工具執行結果: %s\n", role, event.Text)
 			}
 		}
-		fmt.Println("\n[Coordinator] ✨ 任務階段性處理完成。")
+		fmt.Printf("\n[%s] ✨ 任務階段性處理完成。\n", role)
 	}()
 }

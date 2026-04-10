@@ -64,6 +64,13 @@ type ActionResult struct {
 	Data    map[string]interface{} `json:"data,omitempty"`
 }
 
+type ToolDeclaration struct {
+	Name        string                 `json:"name"`
+	Description string                 `json:"description"`
+	Parameters  map[string]interface{} `json:"parameters"`
+	Type        string                 `json:"type"` // "sync" or "async"
+}
+
 // AIEvent 代表從引擎送出的事件 (文字塊或工具調用)
 type AIEvent struct {
 	Type   string      `json:"type"` // "chunk" 或 "action"
