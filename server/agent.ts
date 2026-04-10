@@ -18,44 +18,44 @@ export interface AIEvent {
 }
 
 /**
- * AIEngine Proxy: 透過外部 Go CLI 執行推論
+ * AgenticEngine Proxy: 透過外部 Go CLI 執行推論
  */
-export class AIEngine {
+export class AgenticEngine {
     constructor() {}
 
-    async *generateStream(instructionPrompt: string, contextObj: any = {}) {
-        const { getIsAborted, role, userMessages, workDir } = contextObj;
+    async *GenerateStream(prompt: string, agentContext: any = {}) {
+        const { getIsAborted, role, userMessages, workDir } = agentContext;
 
-        const args = ["-json"];
+        const commandArgs = ["-json"];
         
         // 只傳遞當前 User 訊息作為 prompt
-        const currentPrompt = instructionPrompt || (userMessages && userMessages[userMessages.length - 1]?.text) || "";
-        if (currentPrompt) args.push("-prompt", currentPrompt);
-        if (role) args.push("-role", role);
+        const currentPrompt = prompt || (userMessages && userMessages[userMessages.length - 1]?.text) || "";
+        if (currentPrompt) commandArgs.push("-prompt", currentPrompt);
+        if (role) commandArgs.push("-role", role);
 
         // 如果有工作目錄則透過 context 帶入，但不帶歷史訊息
         if (workDir) {
-            args.push("-context", JSON.stringify({ workDir }));
+            commandArgs.push("-context", JSON.stringify({ workDir }));
         }
 
-        const child = spawn(CLI_PATH, args, { env: process.env });
-        let buffer = "";
+        const engineProcess = spawn(CLI_PATH, commandArgs, { env: process.env });
+        let streamBuffer = "";
 
-        for await (const chunk of child.stdout) {
+        for await (const chunk of engineProcess.stdout) {
             if (getIsAborted?.()) {
-                child.kill();
+                engineProcess.kill();
                 break;
             }
 
-            buffer += chunk.toString();
-            const lines = buffer.split("\n");
-            buffer = lines.pop() || "";
+            streamBuffer += chunk.toString();
+            const streamLines = streamBuffer.split("\n");
+            streamBuffer = streamLines.pop() || "";
 
-            for (const line of lines) {
-                const trimmed = line.trim();
-                if (!trimmed) continue;
+            for (const line of streamLines) {
+                const trimmedLine = line.trim();
+                if (!trimmedLine) continue;
                 try {
-                    yield JSON.parse(trimmed) as AIEvent;
+                    yield JSON.parse(trimmedLine) as AIEvent;
                 } catch { /* 忽略非 JSON 輸出 */ }
             }
         }

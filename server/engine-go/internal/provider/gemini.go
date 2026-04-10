@@ -1,4 +1,4 @@
-package engine
+package provider
 
 import (
 	"bufio"
@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"os"
 	"strings"
+
+	"imagine/engine/internal/types"
 )
 
 type GeminiProvider struct {
@@ -25,8 +27,8 @@ func NewGeminiProvider(model string, queue *RequestQueue) *GeminiProvider {
 	}
 }
 
-func (p *GeminiProvider) GenerateStream(ctx context.Context, prompt string, options map[string]interface{}) (<-chan AIEvent, error) {
-	events := make(chan AIEvent)
+func (p *GeminiProvider) GenerateStream(ctx context.Context, prompt string, options map[string]interface{}) (<-chan types.AIEvent, error) {
+	events := make(chan types.AIEvent)
 
 	go func() {
 		defer close(events)
@@ -95,12 +97,12 @@ func (p *GeminiProvider) GenerateStream(ctx context.Context, prompt string, opti
 					for _, part := range parts {
 						pMap := part.(map[string]interface{})
 						if text, ok := pMap["text"].(string); ok {
-							events <- AIEvent{Type: "chunk", Text: text}
+							events <- types.AIEvent{Type: "chunk", Text: text}
 						}
 						if fn, ok := pMap["functionCall"].(map[string]interface{}); ok {
-							events <- AIEvent{
+							events <- types.AIEvent{
 								Type: "action",
-								Action: &ActionData{
+								Action: &types.ActionData{
 									Name: fn["name"].(string),
 									Args: fn["args"],
 								},

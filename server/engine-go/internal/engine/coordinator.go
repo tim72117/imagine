@@ -3,32 +3,37 @@ package engine
 import (
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
+
+	"imagine/engine/internal/provider"
+	"imagine/engine/internal/types"
 )
 
 /**
  * Coordinator 負責協調整個 AI 系統的運作，對應 TS 中的 Coordinator
  * 它監聽命令隊列，並負責啟動代理人任務
  */
+// GlobalCommandQueue 全域核心命令隊列，所有組件皆可透過此隊列提交指令
+var GlobalCommandQueue = make(chan types.Message, 100)
+
 type Coordinator struct {
-	mutex        sync.RWMutex
-	messages     []Message
-	commandQueue chan Message
-	isRunning    bool
+	mutex     sync.RWMutex
+	messages  []types.Message
+	isRunning bool
 }
 
 func NewCoordinator() *Coordinator {
 	return &Coordinator{
-		commandQueue: make(chan Message, 100),
-		messages:     []Message{},
+		messages: []types.Message{},
 	}
 }
 
 /**
  * Start 啟動背景監聽器，持續處理進入隊列的命令
  */
-func (coordinator *Coordinator) Start(provider AIProvider, toolsConfig *ToolsConfig) {
+func (coordinator *Coordinator) Start(aiProvider provider.AIProvider, toolsConfig *ToolsConfig) {
 	coordinator.mutex.Lock()
 	if coordinator.isRunning {
 		coordinator.mutex.Unlock()
@@ -40,7 +45,7 @@ func (coordinator *Coordinator) Start(provider AIProvider, toolsConfig *ToolsCon
 	fmt.Println("[Coordinator] 🛰️ Go 版背景監聽器已啟動...")
 
 	go func() {
-		for message := range coordinator.commandQueue {
+		for message := range GlobalCommandQueue {
 			coordinator.mutex.Lock()
 			// 將新命令加入歷史紀錄
 			coordinator.messages = append(coordinator.messages, message)
@@ -48,17 +53,46 @@ func (coordinator *Coordinator) Start(provider AIProvider, toolsConfig *ToolsCon
 
 			fmt.Printf("[Coordinator] ⚡️ 偵測到指令: %s\n", message.Text)
 			
-			// 執行批次處理
-			coordinator.ProcessNextBatch(provider, toolsConfig, "explorer") // 預設使用協調者角色
+			// 分派任務
+			coordinator.dispatch(aiProvider, toolsConfig, message)
 		}
 	}()
+
+}
+
+/**
+ * dispatch 處理指令的分發，決定由哪個角色來執行
+ */
+func (coordinator *Coordinator) dispatch(aiProvider provider.AIProvider, toolsConfig *ToolsConfig, message types.Message) {
+	role := coordinator.determineRole(message)
+	if role != "coordinator" {
+		fmt.Printf("[Coordinator] 🚀 正在調派 Worker 角色: %s\n", role)
+	}
+
+	// 執行批次處理
+	coordinator.ProcessNextBatch(aiProvider, toolsConfig, role)
+}
+
+/**
+ * determineRole 解析訊息內容，判定應該使用的角色
+ */
+func (coordinator *Coordinator) determineRole(message types.Message) string {
+	if strings.HasPrefix(message.Text, "SPAWN:") {
+		parts := strings.Split(message.Text, ":")
+		for _, part := range parts {
+			if strings.HasPrefix(part, "ROLE=") {
+				return strings.TrimPrefix(part, "ROLE=")
+			}
+		}
+	}
+	return "coordinator" // 預設為協調者
 }
 
 /**
  * Submit 發送新指令到隊列中
  */
 func (coordinator *Coordinator) Submit(userPrompt string) {
-	coordinator.commandQueue <- Message{
+	GlobalCommandQueue <- types.Message{
 		Role: "user",
 		Text: userPrompt,
 		Time: time.Now().UnixMilli(),
@@ -68,10 +102,10 @@ func (coordinator *Coordinator) Submit(userPrompt string) {
 /**
  * ProcessNextBatch 啟動代理人執行任務
  */
-func (coordinator *Coordinator) ProcessNextBatch(provider AIProvider, toolsConfig *ToolsConfig, role string) {
+func (coordinator *Coordinator) ProcessNextBatch(aiProvider provider.AIProvider, toolsConfig *ToolsConfig, role string) {
 	coordinator.mutex.RLock()
 	// 擷取目前的歷史紀錄
-	history := make([]Message, len(coordinator.messages))
+	history := make([]types.Message, len(coordinator.messages))
 	copy(history, coordinator.messages)
 	coordinator.mutex.RUnlock()
 
@@ -81,7 +115,7 @@ func (coordinator *Coordinator) ProcessNextBatch(provider AIProvider, toolsConfi
 	}
 
 	// 1. 建立 Agent 實體
-	agent := NewAgent(role, toolsConfig, provider)
+	agent := NewAgent(role, toolsConfig, aiProvider)
 
 	// 2. 建立任務與上下文
 	wd, _ := os.Getwd()

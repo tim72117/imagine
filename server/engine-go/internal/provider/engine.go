@@ -1,14 +1,15 @@
-package engine
+package provider
 
 import (
 	"context"
 	"time"
-)
 
+	"imagine/engine/internal/types"
+)
 
 // AIProvider 是推論引擎的統一介面
 type AIProvider interface {
-	GenerateStream(ctx context.Context, prompt string, options map[string]interface{}) (<-chan AIEvent, error)
+	GenerateStream(ctx context.Context, prompt string, options map[string]interface{}) (<-chan types.AIEvent, error)
 }
 
 // RequestQueue 負責限流與併發控制

@@ -1,4 +1,5 @@
-# Go Binaries
+# Binaries
+bin/
 engine-cli
 engine-repl
 engine-server
@@ -8,12 +9,29 @@ engine-server
 *.so
 *.dylib
 
-# Test Binaries
+# Test binaries
 *.test
 __debug_bin
 
 # Dependency directories
-# vendor/ # 如果你有使用 go mod vendor 的話再開啟
+vendor/
 
 # Coverage tools
 *.out
+*.prof
+*.test
+
+# Configurations
+# 建議忽略實際設定檔，以免洩露 API Key，並提供 .example
+configs/settings.json
+!configs/settings.json.example
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS related
+.DS_Store
+Thumbs.db

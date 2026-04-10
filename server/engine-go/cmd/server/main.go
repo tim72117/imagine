@@ -4,19 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"imagine/engine"
+	"imagine/engine/internal/provider"
 	"net/http"
 	"os"
 	"time"
 )
 
 var (
-	queue *engine.RequestQueue
+	queue *provider.RequestQueue
 )
 
 func init() {
 	// 初始化併發控制: 2 個併發, 500ms 間隔
-	queue = engine.NewRequestQueue(2, 500*time.Millisecond)
+	queue = provider.NewRequestQueue(2, 500*time.Millisecond)
 }
 
 type CommandRequest struct {
@@ -41,17 +41,17 @@ func handleGenerate(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Printf("[Go Engine] 📨 Received request (Provider: %s, Model: %s)\n", req.Provider, req.Model)
 
-	var p engine.AIProvider
+	var aiProvider provider.AIProvider
 	if req.Provider == "ollama" {
-		p = engine.NewOllamaProvider("http://localhost:11434", req.Model, queue)
+		aiProvider = provider.NewOllamaProvider("http://localhost:11434", req.Model, queue)
 	} else {
-		p = engine.NewGeminiProvider(req.Model, queue)
+		aiProvider = provider.NewGeminiProvider(req.Model, queue)
 	}
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
-	events, err := p.GenerateStream(ctx, req.Prompt, req.Options)
+	events, err := aiProvider.GenerateStream(ctx, req.Prompt, req.Options)
 	if err != nil {
 		fmt.Printf("[Go Engine] ❌ GenerateStream error: %v\n", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)

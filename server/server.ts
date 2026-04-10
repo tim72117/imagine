@@ -5,7 +5,7 @@ import dotenv from 'dotenv';
 import fs from 'fs-extra';
 import { WebSocket, WebSocketServer } from 'ws';
 import { fileURLToPath } from 'url';
-import { AIEngine } from './agent.js';
+import { AgenticEngine } from './agent.js';
 import { onStateUpdate } from './store.js';
 
 dotenv.config();
@@ -70,8 +70,8 @@ wss.on('connection', (ws: WebSocket) => {
       console.log(`[WS:Go] 🚀 直接啟動 Go 引擎處理指令: ${prompt}`);
       ws.send(JSON.stringify({ isNew: true, chunk: `【指令已接收】：${prompt}` }));
 
-      const engine = new AIEngine();
-      const stream = engine.generateStream("", {
+      const engine = new AgenticEngine();
+      const stream = engine.GenerateStream("", {
           userMessages: [{ role: 'user', text: prompt, time: Date.now() }]
       });
 

@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
-	"imagine/engine"
+	"imagine/engine/internal/config"
+	"imagine/engine/internal/engine"
+	"imagine/engine/internal/provider"
 	"os"
 	"strings"
 	"time"
@@ -18,7 +20,7 @@ func main() {
 	// 1. 定義 CLI 參數
 	providerName := flag.String("provider", "ollama", "AI provider (gemini or ollama)")
 	modelName := flag.String("model", "gemma4:e4b", "Model name")
-	toolsPath := flag.String("tools", "server/engine-go/tools.json", "Path to tools.json configuration")
+	toolsPath := flag.String("tools", "configs/tools.json", "Path to tools.json configuration")
 	flag.Parse()
 
 	fmt.Println("\x1b[36m" + `
@@ -29,17 +31,17 @@ func main() {
     ` + "\x1b[0m")
 
 	// 2. 初始化核心組件與配置
-	settings, _ := engine.LoadSettings("settings.json")
-	queue := engine.NewRequestQueue(1, 100*time.Millisecond)
-	var provider engine.AIProvider
+	settings, _ := config.LoadSettings("configs/settings.json")
+	queue := provider.NewRequestQueue(1, 100*time.Millisecond)
+	var aiProvider provider.AIProvider
 	if *providerName == "ollama" {
-		provider = engine.NewOllamaProvider(settings.OllamaURL, *modelName, queue)
+		aiProvider = provider.NewOllamaProvider(settings.OllamaURL, *modelName, queue)
 	} else {
-		provider = engine.NewGeminiProvider(*modelName, queue)
+		aiProvider = provider.NewGeminiProvider(*modelName, queue)
 	}
 
 	// 載入工具配置
-	config, errorVal := engine.LoadToolsConfig(*toolsPath)
+	toolsConfig, errorVal := engine.LoadToolsConfig(*toolsPath)
 	if errorVal != nil {
 		fmt.Printf("\x1b[31m[Fatal] 無法載入工具配置 (%s): %v\x1b[0m\n", *toolsPath, errorVal)
 		os.Exit(1)
@@ -47,7 +49,7 @@ func main() {
 
 	// 3. 建立並啟動協調者
 	coordinator := engine.NewCoordinator()
-	coordinator.Start(provider, config)
+	coordinator.Start(aiProvider, toolsConfig)
 
 	// 4. 啟動互動式輸入循環
 	scanner := bufio.NewScanner(os.Stdin)

@@ -1,4 +1,4 @@
-package engine
+package provider
 
 import (
 	"bufio"
@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+
+	"imagine/engine/internal/types"
 )
 
 type OllamaProvider struct {
@@ -34,8 +36,8 @@ type ollamaRequest struct {
 	Tools    interface{}   `json:"tools,omitempty"`
 }
 
-func (p *OllamaProvider) GenerateStream(ctx context.Context, prompt string, options map[string]interface{}) (<-chan AIEvent, error) {
-	events := make(chan AIEvent)
+func (p *OllamaProvider) GenerateStream(ctx context.Context, prompt string, options map[string]interface{}) (<-chan types.AIEvent, error) {
+	events := make(chan types.AIEvent)
 
 	go func() {
 		defer close(events)
@@ -88,7 +90,7 @@ func (p *OllamaProvider) GenerateStream(ctx context.Context, prompt string, opti
 						if content, ok := message["content"].(string); ok {
 							if content != "" {
 								// fmt.Printf("[Ollama Debug] Chunk: %q\n", content)
-								events <- AIEvent{Type: "chunk", Text: content}
+								events <- types.AIEvent{Type: "chunk", Text: content}
 							}
 						}
 						// 處理工具調用
@@ -96,9 +98,9 @@ func (p *OllamaProvider) GenerateStream(ctx context.Context, prompt string, opti
 							for _, tc := range toolCalls {
 								call := tc.(map[string]interface{})
 								fn := call["function"].(map[string]interface{})
-								events <- AIEvent{
+								events <- types.AIEvent{
 									Type: "action",
-									Action: &ActionData{
+									Action: &types.ActionData{
 										Name: fn["name"].(string),
 										Args: fn["arguments"],
 									},

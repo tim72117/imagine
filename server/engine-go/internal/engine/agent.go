@@ -3,6 +3,8 @@ package engine
 import (
 	"context"
 	"fmt"
+	"imagine/engine/internal/provider"
+	"imagine/engine/internal/types"
 )
 
 /**
@@ -11,7 +13,7 @@ import (
 type Agent struct {
 	RoleName     string
 	RoleType     string
-	Provider     AIProvider
+	Provider     provider.AIProvider
 	SystemPrompt string
 	ToolPrompt   string
 	AllowedTools []string
@@ -21,11 +23,11 @@ type Agent struct {
 /**
  * NewAgent 建立一個新的代理人實體
  */
-func NewAgent(roleType string, toolsConfig *ToolsConfig, provider AIProvider) *Agent {
+func NewAgent(roleType string, toolsConfig *ToolsConfig, aiProvider provider.AIProvider) *Agent {
 	return &Agent{
 		RoleName:     roleType, // 簡化處理，實際可從 config 抓取更精確的名稱
 		RoleType:     roleType,
-		Provider:     provider,
+		Provider:     aiProvider,
 		SystemPrompt: toolsConfig.GetRolePrompt(roleType),
 		ToolPrompt:   "請務必在執行工具前，先用文字簡短說明你的行動意圖與原因。", 
 		AllowedTools: toolsConfig.GetRoleTools(roleType),
@@ -37,8 +39,8 @@ func NewAgent(roleType string, toolsConfig *ToolsConfig, provider AIProvider) *A
  * Run 執行任務推論循環，對應 TS 中的 run 方法
  * 它會自動處理多輪對話 (Max Rounds) 並透過通道傳回所有事件
  */
-func (agent *Agent) Run(agentContext *AgentContext, allDeclarations map[string]interface{}) (<-chan AIEvent, error) {
-	resultEvents := make(chan AIEvent, 500)
+func (agent *Agent) Run(agentContext *AgentContext, allDeclarations map[string]interface{}) (<-chan types.AIEvent, error) {
+	resultEvents := make(chan types.AIEvent, 500)
 	maxRounds := 10
 	
 	go func() {
@@ -58,14 +60,14 @@ func (agent *Agent) Run(agentContext *AgentContext, allDeclarations map[string]i
 		}())
 
 		// 同步狀態為 Active
-		agentContext.UpdateTaskState(StatusActive, 0)
+		agentContext.UpdateTaskState(types.StatusActive, 0)
 
 		// --- 推論循環 ---
 		for agentContext.Round < maxRounds {
 			currentRound := agentContext.Round + 1
 			fmt.Printf("  [%s] 🔄 第 %d 輪循環啟動\n", agent.RoleName, currentRound)
 
-			agentContext.UpdateTaskState(StatusThinking, 10+(currentRound*10))
+			agentContext.UpdateTaskState(types.StatusThinking, 10+(currentRound*10))
 			agentContext.Round = currentRound
 
 			task := agentContext.GetCurrentTask()
@@ -96,14 +98,14 @@ func (agent *Agent) Run(agentContext *AgentContext, allDeclarations map[string]i
 			)
 
 			if err != nil {
-				resultEvents <- AIEvent{Type: "error", Text: err.Error()}
+				resultEvents <- types.AIEvent{Type: "error", Text: err.Error()}
 				break
 			}
 
 			// 3. 在 Agent 中執行推論啟動
 			rawEvents, err := agent.Provider.GenerateStream(context.Background(), instruction, options)
 			if err != nil {
-				resultEvents <- AIEvent{Type: "error", Text: err.Error()}
+				resultEvents <- types.AIEvent{Type: "error", Text: err.Error()}
 				break
 			}
 
@@ -116,8 +118,8 @@ func (agent *Agent) Run(agentContext *AgentContext, allDeclarations map[string]i
 					toolCalledThisRound = true
 					
 					// 紀錄 Function Call
-					currentAssistantMessage.Parts = append(currentAssistantMessage.Parts, Part{
-						FunctionCall: &FunctionCall{
+					currentAssistantMessage.Parts = append(currentAssistantMessage.Parts, types.Part{
+						FunctionCall: &types.FunctionCall{
 							Name: event.Action.Name,
 							Args: event.Action.Args,
 						},
@@ -131,14 +133,14 @@ func (agent *Agent) Run(agentContext *AgentContext, allDeclarations map[string]i
 					agent.Toolbox.Dispatch(event.Action.Name, args, agentContext, allDeclarations, resultEvents)
 
 				} else if event.Type == "chunk" {
-					currentAssistantMessage.Parts = append(currentAssistantMessage.Parts, Part{Text: event.Text})
+					currentAssistantMessage.Parts = append(currentAssistantMessage.Parts, types.Part{Text: event.Text})
 					resultEvents <- event
 				}
 			}
 
 			// 3. 歸檔本輪助手回應
 			agentContext.AddMessage("assistant", currentAssistantMessage)
-			agentContext.UpdateTaskState(StatusThinkingCompleted, 10+(currentRound*10))
+			agentContext.UpdateTaskState(types.StatusThinkingCompleted, 10+(currentRound*10))
 
 			// 檢查是否結束
 			if !toolCalledThisRound {

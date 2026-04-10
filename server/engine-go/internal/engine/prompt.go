@@ -6,9 +6,9 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"imagine/engine/internal/types"
 )
-
-
 
 /**
  * BuildInferenceParameters 將 Agent 的配置與歷史紀錄組裝為推論參數 (Prompt + Options)
@@ -17,12 +17,12 @@ func BuildInferenceParameters(
 	systemPrompt string,
 	toolPrompt string,
 	envInfo string,
-	userMessages []Message,
-	assistantMessages []Message,
+	userMessages []types.Message,
+	assistantMessages []types.Message,
 ) (string, error) {
 
 	// 組合並排序對話歷史
-	var flattenedHistory []Message
+	var flattenedHistory []types.Message
 	flattenedHistory = append(flattenedHistory, userMessages...)
 	flattenedHistory = append(flattenedHistory, assistantMessages...)
 
@@ -74,11 +74,11 @@ func BuildInferenceParameters(
 /**
  * PrepareNextRoundMessage 初始化一個新的助理訊息，對應 TS 中的 assistantMessage 初始化
  */
-func PrepareNextRoundMessage() Message {
-	return Message{
+func PrepareNextRoundMessage() types.Message {
+	return types.Message{
 		Role:  "assistant",
 		Text:  "",
-		Parts: []Part{},
+		Parts: []types.Part{},
 		Time:  time.Now().UnixMilli(),
 	}
 }
@@ -86,7 +86,7 @@ func PrepareNextRoundMessage() Message {
 /**
  * ConsumeAndPrintStream 消耗串流並輸出至終端機，對應 CLI 中的推論結果渲染邏輯
  */
-func ConsumeAndPrintStream(events <-chan AIEvent, isJson bool) {
+func ConsumeAndPrintStream(events <-chan types.AIEvent, isJson bool) {
 	for event := range events {
 		if isJson {
 			data, _ := json.Marshal(event)
