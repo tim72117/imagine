@@ -34,7 +34,7 @@ func NewEventBus() *EventBus {
 
 /**
  * Subscribe 訂閱特定主題的事件
- * @param topic 訂閱的主題名稱 (例如 "agent.finished")
+ * @param topic 訂閱的主題名稱 (例如 "task.finished")
  * @param callback 接收到事件時執行的函式
  */
 func (eventBus *EventBus) Subscribe(topic string, callback EventCallback) {
@@ -63,8 +63,8 @@ func (eventBus *EventBus) Publish(topic string, payload interface{}) {
 	for _, handler := range handlers {
 		go func(currentHandler EventCallback) {
 			defer func() {
-				if r := recover(); r != nil {
-					fmt.Printf("[EventBus] ❌ 執行主題 %s 的回調時發生驚恐 (Panic): %v\n", topic, r)
+				if recoveryValue := recover(); recoveryValue != nil {
+					fmt.Printf("[EventBus] ❌ 執行主題 %s 的回調時發生驚恐 (Panic): %v\n", topic, recoveryValue)
 				}
 			}()
 			currentHandler(payload)

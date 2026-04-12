@@ -14,11 +14,11 @@ import (
 
 /**
  * Go 版互動式 REPL 工具
- * 這是一個完全由 Go 核心驅動的終端機介面
+ * 這是一個完全由 Go 核心驅動的終端機介面，支援多種 AI 提供者。
  */
 func main() {
 	// 1. 定義 CLI 參數
-	providerName := flag.String("provider", "ollama", "AI provider (gemini or ollama)")
+	providerName := flag.String("provider", "ollama", "AI provider (claude, gemini or ollama)")
 	modelName := flag.String("model", "gemma4:e2b", "Model name")
 	toolsPath := flag.String("tools", "configs/tools.json", "Path to tools.json configuration")
 	flag.Parse()
@@ -30,28 +30,34 @@ func main() {
     輸入指令來啟動任務，輸入 'exit' 或 'quit' 退出。
     ` + "\x1b[0m")
 
-	// 2. 初始化核心組件與配置
-	settings, _ := config.LoadSettings("configs/settings.json")
-	queue := provider.NewRequestQueue(1, 100*time.Millisecond)
+	// 2. 準備依賴項 (根據 CLI 參數選擇不同的 Provider 實作)
 	var aiProvider provider.AIProvider
-	if *providerName == "ollama" {
-		aiProvider = provider.NewOllamaProvider(settings.OllamaURL, *modelName, queue)
-	} else {
-		aiProvider = provider.NewGeminiProvider(*modelName, queue)
-	}
+	queue := provider.NewRequestQueue(1, 100*time.Millisecond)
 
-	// 載入工具配置
-	toolsConfig, errorVal := engine.LoadToolsConfig(*toolsPath)
-	if errorVal != nil {
-		fmt.Printf("\x1b[31m[Fatal] 無法載入工具配置 (%s): %v\x1b[0m\n", *toolsPath, errorVal)
+	switch *providerName {
+	case "ollama":
+		settings, _ := config.LoadSettings("configs/settings.json")
+		aiProvider = provider.NewOllamaProvider(settings.OllamaURL, *modelName, queue)
+	case "gemini":
+		aiProvider = provider.NewGeminiProvider(*modelName, queue)
+	case "claude":
+		aiProvider = provider.NewClaudeProvider(*modelName, queue)
+	default:
+		fmt.Printf("\x1b[31m[Fatal] 不支援的提供者: %s\x1b[0m\n", *providerName)
 		os.Exit(1)
 	}
 
-	// 3. 建立並啟動協調者
-	coordinator := engine.NewCoordinator()
-	coordinator.Start(aiProvider, toolsConfig)
+	// 3. 執行引擎初始化 (這會注入 Provider 並啟動背景監聽)
+	if errorValue := engine.Initialize(aiProvider, *toolsPath); errorValue != nil {
+		fmt.Printf("\x1b[31m[Fatal] %v\x1b[0m\n", errorValue)
+		os.Exit(1)
+	}
 
-	// 4. 啟動互動式輸入循環
+	// 4. 建立協調者實例 並 啟動背景監聽
+	coordinator := engine.NewCoordinator()
+	coordinator.Start()
+
+	// 5. 啟動互動式輸入循環
 	scanner := bufio.NewScanner(os.Stdin)
 	fmt.Print("> ")
 
@@ -70,17 +76,15 @@ func main() {
 
 		fmt.Printf("\x1b[90m[User] 提交指令: %s\x1b[0m\n", input)
 		
-		// 提交到協調者 (這會觸發 ProcessNextBatch)
+		// 透過協調者提交任務
 		coordinator.Submit(input)
 
-		// 這裡我們需要一個簡單的機制讓當前推論跑完後再顯示提示符
-		// 暫時使用簡單的等待，未來可以透過 Channel 接收任務完成訊號
+		// 這裡使用簡單的等待，讓推論串流能完整顯示
 		time.Sleep(2 * time.Second)
-		
 		fmt.Print("\n> ")
 	}
 
-	if errorVal := scanner.Err(); errorVal != nil {
-		fmt.Printf("\x1b[31m[Error] 讀取輸入時發生錯誤: %v\x1b[0m\n", errorVal)
+	if errorValue := scanner.Err(); errorValue != nil {
+		fmt.Printf("\x1b[31m[Error] 讀取輸入時發生錯誤: %v\x1b[0m\n", errorValue)
 	}
 }

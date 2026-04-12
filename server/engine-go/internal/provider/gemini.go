@@ -19,51 +19,88 @@ type GeminiProvider struct {
 	Queue     *RequestQueue
 }
 
-func NewGeminiProvider(model string, queue *RequestQueue) *GeminiProvider {
+func NewGeminiProvider(modelName string, queue *RequestQueue) *GeminiProvider {
 	return &GeminiProvider{
 		APIKey:    os.Getenv("GOOGLE_API_KEY"),
-		ModelName: model,
+		ModelName: modelName,
 		Queue:     queue,
 	}
 }
 
-func (p *GeminiProvider) GenerateStream(ctx context.Context, prompt string, options map[string]interface{}) (<-chan types.AIEvent, error) {
+func (providerInstance *GeminiProvider) GenerateStream(contextInstance context.Context, messages []types.Message, options map[string]interface{}) (<-chan types.AIEvent, error) {
 	events := make(chan types.AIEvent)
 
 	go func() {
 		defer close(events)
 
-		err := p.Queue.Execute(func() error {
-			url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:streamGenerateContent?key=%s", p.ModelName, p.APIKey)
+		errorValue := providerInstance.Queue.Execute(func() error {
+			url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:streamGenerateContent?key=%s", providerInstance.ModelName, providerInstance.APIKey)
 
-			reqBody := map[string]interface{}{
-				"contents": []interface{}{
-					map[string]interface{}{
-						"role": "user",
+			// 轉換對話歷史為 Gemini 格式 (Contents)
+			var geminiContents []interface{}
+			var systemInstruction interface{}
+
+			for _, message := range messages {
+				if message.Role == "system" {
+					systemInstruction = map[string]interface{}{
 						"parts": []interface{}{
-							map[string]string{"text": prompt},
+							map[string]string{"text": message.Text},
 						},
+					}
+					continue
+				}
+
+				role := "user"
+				if message.Role == "assistant" {
+					role = "model"
+				}
+
+				geminiContents = append(geminiContents, map[string]interface{}{
+					"role": role,
+					"parts": []interface{}{
+						map[string]string{"text": message.Text},
 					},
-				},
+				})
 			}
 
-			if tools, ok := options["tools"]; ok {
-				reqBody["tools"] = tools
+			requestBody := map[string]interface{}{
+				"contents": geminiContents,
 			}
 
-			jsonBody, _ := json.Marshal(reqBody)
-			req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonBody))
-			if err != nil {
-				return err
+			if systemInstruction != nil {
+				requestBody["systemInstruction"] = systemInstruction
 			}
 
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil {
-				return err
+			// 轉換工具格式
+			if toolDeclarations, isSuccessful := options["tools"].([]types.ToolDeclaration); isSuccessful && len(toolDeclarations) > 0 {
+				convertedTools := []interface{}{}
+				for _, declaration := range toolDeclarations {
+					convertedTools = append(convertedTools, map[string]interface{}{
+						"name":        declaration.Name,
+						"description": declaration.Description,
+						"parameters":  declaration.Parameters,
+					})
+				}
+				requestBody["tools"] = []interface{}{
+					map[string]interface{}{
+						"functionDeclarations": convertedTools,
+					},
+				}
 			}
-			defer resp.Body.Close()
 
-			scanner := bufio.NewScanner(resp.Body)
+			jsonBody, _ := json.Marshal(requestBody)
+			request, errorValue := http.NewRequestWithContext(contextInstance, "POST", url, bytes.NewBuffer(jsonBody))
+			if errorValue != nil {
+				return errorValue
+			}
+
+			response, errorValue := http.DefaultClient.Do(request)
+			if errorValue != nil {
+				return errorValue
+			}
+			defer response.Body.Close()
+
+			scanner := bufio.NewScanner(response.Body)
 			for scanner.Scan() {
 				line := scanner.Text()
 				line = strings.TrimLeft(line, " ,")
@@ -72,39 +109,38 @@ func (p *GeminiProvider) GenerateStream(ctx context.Context, prompt string, opti
 				}
 
 				var chunks []map[string]interface{}
-				// Gemini stream API returns a JSON array over time, or multiple objects
-				if err := json.Unmarshal([]byte("["+strings.TrimSuffix(line, ",")+"]"), &chunks); err != nil {
+				if errorValue := json.Unmarshal([]byte("["+strings.TrimSuffix(line, ",")+"]"), &chunks); errorValue != nil {
 					continue
 				}
 
 				for _, chunk := range chunks {
-					candidates, ok := chunk["candidates"].([]interface{})
-					if !ok || len(candidates) == 0 {
+					candidates, isSuccessful := chunk["candidates"].([]interface{})
+					if !isSuccessful || len(candidates) == 0 {
 						continue
 					}
 
 					candidate := candidates[0].(map[string]interface{})
-					content, ok := candidate["content"].(map[string]interface{})
-					if !ok {
+					content, isSuccessful := candidate["content"].(map[string]interface{})
+					if !isSuccessful {
 						continue
 					}
 
-					parts, ok := content["parts"].([]interface{})
-					if !ok {
+					parts, isSuccessful := content["parts"].([]interface{})
+					if !isSuccessful {
 						continue
 					}
 
-					for _, part := range parts {
-						pMap := part.(map[string]interface{})
-						if text, ok := pMap["text"].(string); ok {
+					for _, partElement := range parts {
+						partMap := partElement.(map[string]interface{})
+						if text, isText := partMap["text"].(string); isText {
 							events <- types.AIEvent{Type: "chunk", Text: text}
 						}
-						if fn, ok := pMap["functionCall"].(map[string]interface{}); ok {
+						if functionCall, isAction := partMap["functionCall"].(map[string]interface{}); isAction {
 							events <- types.AIEvent{
 								Type: "action",
 								Action: &types.ActionData{
-									Name: fn["name"].(string),
-									Args: fn["args"],
+									Name: functionCall["name"].(string),
+									Args: functionCall["args"],
 								},
 							}
 						}
@@ -114,8 +150,8 @@ func (p *GeminiProvider) GenerateStream(ctx context.Context, prompt string, opti
 			return scanner.Err()
 		})
 
-		if err != nil {
-			fmt.Printf("[Gemini] Error: %v\n", err)
+		if errorValue != nil {
+			fmt.Printf("[Gemini] 發生錯誤: %v\n", errorValue)
 		}
 	}()
 

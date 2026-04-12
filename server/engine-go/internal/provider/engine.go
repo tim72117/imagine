@@ -7,37 +7,41 @@ import (
 	"imagine/engine/internal/types"
 )
 
-// AIProvider 是推論引擎的統一介面
+/**
+ * AIProvider 是推論引擎的統一介面。
+ * 目前維持使用單一字串 prompt 作為輸入，待命名規範化完成後再行升級。
+ */
 type AIProvider interface {
-	GenerateStream(ctx context.Context, prompt string, options map[string]interface{}) (<-chan types.AIEvent, error)
+	GenerateStream(contextInstance context.Context, messages []types.Message, options map[string]interface{}) (<-chan types.AIEvent, error)
 }
 
-// RequestQueue 負責限流與併發控制
+/**
+ * RequestQueue 負責限流與併發控制。
+ */
 type RequestQueue struct {
 	tokens chan struct{}
 	ticker *time.Ticker
 }
 
 func NewRequestQueue(maxConcurrent int, minInterval time.Duration) *RequestQueue {
-	q := &RequestQueue{
+	queueInstance := &RequestQueue{
 		tokens: make(chan struct{}, maxConcurrent),
 		ticker: time.NewTicker(minInterval),
 	}
-	// 初始化令牌
 	for i := 0; i < maxConcurrent; i++ {
-		q.tokens <- struct{}{}
+		queueInstance.tokens <- struct{}{}
 	}
-	return q
+	return queueInstance
 }
 
-// Execute 確保在限制範圍內執行任務
-func (q *RequestQueue) Execute(task func() error) error {
-	// 等待令牌 (控制最大併發)
-	token := <-q.tokens
-	defer func() { q.tokens <- token }()
+/**
+ * Execute 確保在限制範圍內執行任務。
+ */
+func (queueInstance *RequestQueue) Execute(task func() error) error {
+	token := <-queueInstance.tokens
+	defer func() { queueInstance.tokens <- token }()
 
-	// 等待間隔 (控制請求頻率)
-	<-q.ticker.C
+	<-queueInstance.ticker.C
 
 	return task()
 }

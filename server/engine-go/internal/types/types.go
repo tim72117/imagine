@@ -14,7 +14,6 @@ type Message struct {
 	Data      any    `json:"data,omitempty"`
 	Tool      string `json:"tool,omitempty"`
 	AgentID   string `json:"agentId,omitempty"`
-	TaskID    string `json:"taskId,omitempty"`
 }
 
 // Part 代表訊息中的組件 (文字或工具調用)
@@ -87,4 +86,11 @@ type AIEvent struct {
 type ActionData struct {
 	Name string      `json:"name"`
 	Args interface{} `json:"args"`
+}
+
+// TaskFinishedEvent 代表工具執行完畢後的事件 Payload
+type TaskFinishedEvent struct {
+	TaskID   string       `json:"taskId"`
+	ToolName string       `json:"toolName"`
+	Result   ActionResult `json:"result"`
 }

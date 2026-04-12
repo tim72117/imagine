@@ -11,79 +11,84 @@ import (
 )
 
 var (
-	queue *provider.RequestQueue
+	requestQueue *provider.RequestQueue
 )
 
 func init() {
 	// 初始化併發控制: 2 個併發, 500ms 間隔
-	queue = provider.NewRequestQueue(2, 500*time.Millisecond)
+	requestQueue = provider.NewRequestQueue(2, 500*time.Millisecond)
 }
 
 type CommandRequest struct {
-	Provider string                 `json:"provider"` // "gemini" 或 "ollama"
+	Provider string                 `json:"provider"` // "gemini", "ollama" 或 "claude"
 	Model    string                 `json:"model"`
 	Prompt   string                 `json:"prompt"`
 	Options  map[string]interface{} `json:"options"`
 }
 
-func handleGenerate(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
-		http.Error(w, "Only POST allowed", http.StatusMethodNotAllowed)
+func handleGenerate(responseWriter http.ResponseWriter, httpRequest *http.Request) {
+	if httpRequest.Method != "POST" {
+		http.Error(responseWriter, "僅允許 POST 請求", http.StatusMethodNotAllowed)
 		return
 	}
 
-	var req CommandRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		fmt.Printf("[Go Engine] ❌ Decode error: %v\n", err)
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	var requestData CommandRequest
+	if errorValue := json.NewDecoder(httpRequest.Body).Decode(&requestData); errorValue != nil {
+		fmt.Printf("[Go Engine] ❌ 解析錯誤: %v\n", errorValue)
+		http.Error(responseWriter, errorValue.Error(), http.StatusBadRequest)
 		return
 	}
 
-	fmt.Printf("[Go Engine] 📨 Received request (Provider: %s, Model: %s)\n", req.Provider, req.Model)
+	fmt.Printf("[Go Engine] 📨 收到請求 (提供者: %s, 模型: %s)\n", requestData.Provider, requestData.Model)
 
 	var aiProvider provider.AIProvider
-	if req.Provider == "ollama" {
-		aiProvider = provider.NewOllamaProvider("http://localhost:11434", req.Model, queue)
+	if requestData.Provider == "ollama" {
+		aiProvider = provider.NewOllamaProvider("http://localhost:11434", requestData.Model, requestQueue)
+	} else if requestData.Provider == "gemini" {
+		aiProvider = provider.NewGeminiProvider(requestData.Model, requestQueue)
 	} else {
-		aiProvider = provider.NewGeminiProvider(req.Model, queue)
+		aiProvider = provider.NewClaudeProvider(requestData.Model, requestQueue)
 	}
 
-	ctx, cancel := context.WithCancel(r.Context())
-	defer cancel()
+	contextInstance, cancelFunction := context.WithCancel(httpRequest.Context())
+	defer cancelFunction()
 
-	events, err := aiProvider.GenerateStream(ctx, req.Prompt, req.Options)
-	if err != nil {
-		fmt.Printf("[Go Engine] ❌ GenerateStream error: %v\n", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	eventStream, errorValue := aiProvider.GenerateStream(contextInstance, requestData.Prompt, requestData.Options)
+	if errorValue != nil {
+		fmt.Printf("[Go Engine] ❌ 串流生成錯誤: %v\n", errorValue)
+		http.Error(responseWriter, errorValue.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// 設定 SSE (Server-Sent Events) 格式
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
+	// 1. 設定 SSE (Server-Sent Events) 格式
+	responseWriter.Header().Set("Content-Type", "text/event-stream")
+	responseWriter.Header().Set("Cache-Control", "no-cache")
+	responseWriter.Header().Set("Connection", "keep-alive")
 
-	count := 0
-	for event := range events {
-		count++
-		data, _ := json.Marshal(event)
-		fmt.Fprintf(w, "data: %s\n\n", data)
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
+	eventCount := 0
+	for event := range eventStream {
+		eventCount++
+		jsonData, _ := json.Marshal(event)
+		fmt.Fprintf(responseWriter, "data: %s\n\n", jsonData)
+		
+		// 2. 立即推送緩衝區
+		if flusher, isSuccessful := responseWriter.(http.Flusher); isSuccessful {
+			flusher.Flush()
 		}
 	}
-	fmt.Printf("[Go Engine] ✅ Completed streaming %d events\n", count)
+	fmt.Printf("[Go Engine] ✅ 已完成 %d 個事件的串流傳輸\n", eventCount)
 }
 
 func main() {
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
+	portNumber := os.Getenv("PORT")
+	if portNumber == "" {
+		portNumber = "8080"
 	}
 
 	http.HandleFunc("/generate", handleGenerate)
-	fmt.Printf("[Go Engine] 🚀 Server starting on :%s\n", port)
-	if err := http.ListenAndServe(":"+port, nil); err != nil {
-		fmt.Printf("Fatal: %v\n", err)
+	fmt.Printf("[Go Engine] 🚀 伺服器啟動於 :%s\n", portNumber)
+	
+	if errorValue := http.ListenAndServe(":"+portNumber, nil); errorValue != nil {
+		fmt.Printf("致命錯誤: %v\n", errorValue)
 	}
 }

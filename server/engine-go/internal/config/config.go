@@ -22,16 +22,16 @@ func LoadSettings(path string) (*Settings, error) {
 		OllamaURL: "http://localhost:11434",
 	}
 
-	file, err := os.Open(path)
-	if err != nil {
+	file, errorValue := os.Open(path)
+	if errorValue != nil {
 		// 如果檔案不存在，則返回預設值
 		return defaultSettings, nil
 	}
 	defer file.Close()
 
 	var settings Settings
-	if err := json.NewDecoder(file).Decode(&settings); err != nil {
-		return defaultSettings, err
+	if errorValue := json.NewDecoder(file).Decode(&settings); errorValue != nil {
+		return defaultSettings, errorValue
 	}
 
 	// 確保必要欄位有值

@@ -17,8 +17,7 @@ type OllamaProvider struct {
 	Queue     *RequestQueue
 }
 
-func NewOllamaProvider(baseURL, model string, queue *RequestQueue) *OllamaProvider {
-	// 移除結尾的斜線以確保路徑拼接正確
+func NewOllamaProvider(baseURL string, model string, queue *RequestQueue) *OllamaProvider {
 	if len(baseURL) > 0 && baseURL[len(baseURL)-1] == '/' {
 		baseURL = baseURL[:len(baseURL)-1]
 	}
@@ -36,106 +35,109 @@ type ollamaRequest struct {
 	Tools    interface{}   `json:"tools,omitempty"`
 }
 
-func (p *OllamaProvider) GenerateStream(ctx context.Context, prompt string, options map[string]interface{}) (<-chan types.AIEvent, error) {
+func (providerInstance *OllamaProvider) GenerateStream(contextInstance context.Context, messages []types.Message, options map[string]interface{}) (<-chan types.AIEvent, error) {
 	events := make(chan types.AIEvent)
 
 	go func() {
 		defer close(events)
 
-		err := p.Queue.Execute(func() error {
-			// 轉換 Gemini 格式的工具宣告為 Ollama 格式
+		errorValue := providerInstance.Queue.Execute(func() error {
+			// 1. 轉換工具宣告
 			var ollamaTools []interface{}
-			if tools, ok := options["tools"].([]map[string]interface{}); ok && len(tools) > 0 {
-				if decls, ok := tools[0]["functionDeclarations"].([]interface{}); ok {
-					for _, d := range decls {
-						ollamaTools = append(ollamaTools, map[string]interface{}{
-							"type":     "function",
-							"function": d,
-						})
-					}
+			if tools, isSuccessful := options["tools"].([]types.ToolDeclaration); isSuccessful && len(tools) > 0 {
+				for _, declaration := range tools {
+					ollamaTools = append(ollamaTools, map[string]interface{}{
+						"type": "function",
+						"function": map[string]interface{}{
+							"name":        declaration.Name,
+							"description": declaration.Description,
+							"parameters":  declaration.Parameters,
+						},
+					})
 				}
 			}
 
-			reqBody := ollamaRequest{
-				Model:    p.ModelName,
-				Messages: []interface{}{map[string]string{"role": "user", "content": prompt}},
+			// 2. 轉換結構化訊息列表
+			var ollamaMessages []interface{}
+			for _, message := range messages {
+				ollamaMessages = append(ollamaMessages, map[string]interface{}{
+					"role":    message.Role,
+					"content": message.Text,
+				})
+			}
+
+			requestBody := ollamaRequest{
+				Model:    providerInstance.ModelName,
+				Messages: ollamaMessages,
 				Stream:   true,
 				Tools:    ollamaTools,
 			}
 
-			fmt.Printf("[Ollama] 🏗️  Calling %s (Model: %s)\n", p.BaseURL, p.ModelName)
-			jsonBody, _ := json.Marshal(reqBody)
-			req, err := http.NewRequestWithContext(ctx, "POST", p.BaseURL+"/api/chat", bytes.NewBuffer(jsonBody))
-			if err != nil {
-				return err
+			fmt.Printf("[Ollama] 🏗️  發起結構化請求 (模型: %s, 訊息數: %d)\n", providerInstance.ModelName, len(ollamaMessages))
+			jsonBody, _ := json.Marshal(requestBody)
+			request, errorValue := http.NewRequestWithContext(contextInstance, "POST", providerInstance.BaseURL+"/api/chat", bytes.NewBuffer(jsonBody))
+			if errorValue != nil {
+				return errorValue
 			}
 
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil {
-				return err
+			response, errorValue := http.DefaultClient.Do(request)
+			if errorValue != nil {
+				return errorValue
 			}
-			defer resp.Body.Close()
+			defer response.Body.Close()
 
-			if resp.StatusCode != http.StatusOK {
-				return fmt.Errorf("ollama error: status %d", resp.StatusCode)
+			if response.StatusCode != http.StatusOK {
+				return fmt.Errorf("ollama 伺服器錯誤: 狀態碼 %d", response.StatusCode)
 			}
-			fmt.Printf("[Ollama] 📡 Established stream connection (Status: %d)\n", resp.StatusCode)
 
-			scanner := bufio.NewScanner(resp.Body)
+			scanner := bufio.NewScanner(response.Body)
 			for scanner.Scan() {
 				select {
-				case <-ctx.Done():
-					return ctx.Err()
+				case <-contextInstance.Done():
+					return contextInstance.Err()
 				default:
 					line := scanner.Text()
 					if line == "" {
 						continue
 					}
 
-					var raw map[string]interface{}
-					if err := json.Unmarshal([]byte(line), &raw); err != nil {
+					var rawResponse map[string]interface{}
+					if errorValue := json.Unmarshal([]byte(line), &rawResponse); errorValue != nil {
 						continue
 					}
 
-					// 處理訊息
-					if message, ok := raw["message"].(map[string]interface{}); ok {
+					if message, isSuccessful := rawResponse["message"].(map[string]interface{}); isSuccessful {
 						// 處理文字
-						if content, ok := message["content"].(string); ok {
-							if content != "" {
-								// fmt.Printf("[Ollama Debug] Chunk: %q\n", content)
-								events <- types.AIEvent{Type: "chunk", Text: content}
-							}
+						if content, isText := message["content"].(string); isText && content != "" {
+							events <- types.AIEvent{Type: "chunk", Text: content}
 						}
-						// 處理工具調用
-						if toolCalls, ok := message["tool_calls"].([]interface{}); ok {
-							for _, tc := range toolCalls {
-								call, ok := tc.(map[string]interface{})
-								if !ok {
+						
+						// 處理原生工具調用 (Tool Calls)
+						if toolCalls, isAction := message["tool_calls"].([]interface{}); isAction {
+							for _, toolCallElement := range toolCalls {
+								call, isSuccessful := toolCallElement.(map[string]interface{})
+								if !isSuccessful {
 									continue
 								}
-								fn, ok := call["function"].(map[string]interface{})
-								if !ok {
+								functionData, isSuccessful := call["function"].(map[string]interface{})
+								if !isSuccessful {
 									continue
 								}
 
-								// 嘗試解析參數 (可能可能是 map 或是 JSON 字串)
-								args := fn["arguments"]
-								var parsedArgs map[string]interface{}
-
-								switch v := args.(type) {
+								argumentsRaw := functionData["arguments"]
+								var parsedArguments map[string]interface{}
+								switch value := argumentsRaw.(type) {
 								case map[string]interface{}:
-									parsedArgs = v
+									parsedArguments = value
 								case string:
-									if err := json.Unmarshal([]byte(v), &parsedArgs); err != nil {
-										fmt.Printf("[Ollama] 無法解析工具參數字串: %v\n", err)
-									}
+									_ = json.Unmarshal([]byte(value), &parsedArguments)
 								}
 
 								events <- types.AIEvent{
 									Type: "action",
 									Action: &types.ActionData{
-										Name: fn["name"].(string),
-										Args: parsedArgs,
+										Name: functionData["name"].(string),
+										Args: parsedArguments,
 									},
 								}
 							}
@@ -146,8 +148,8 @@ func (p *OllamaProvider) GenerateStream(ctx context.Context, prompt string, opti
 			return scanner.Err()
 		})
 
-		if err != nil {
-			fmt.Printf("[Ollama] Error: %v\n", err)
+		if errorValue != nil {
+			events <- types.AIEvent{Type: "error", Text: errorValue.Error()}
 		}
 	}()
 

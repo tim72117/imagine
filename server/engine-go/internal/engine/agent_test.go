@@ -42,12 +42,13 @@ func TestAgentSimpleRun(t *testing.T) {
 
 	// 2. 初始化 Agent 與 Context
 	agent := NewAgent("explorer", toolsConfig, provider)
-	taskID := CreateTask("explorer", "TEST-AGENT")
+	agentID := "TEST-AGENT"
+	GlobalAppStore.CreateTaskWithID(agentID, "explorer", agentID)
+
 	agentContext := &AgentContext{
-		TaskID:  taskID,
-		AgentID: "TEST-AGENT",
-		WorkDir: "/tmp/test",
-		Store:   GlobalAppStore,
+		AgentID:         agentID,
+		WorkingDirectory: "/tmp/test",
+		Store:           GlobalAppStore,
 	}
 
 	// 3. 執行 Agent
@@ -74,9 +75,11 @@ func TestAgentSimpleRun(t *testing.T) {
 	}
 
 	// 驗證狀態
-	task := agentContext.GetCurrentTask()
-	if task.Status != StatusThinkingCompleted {
-		t.Errorf("Expected status %s, got %s", StatusThinkingCompleted, task.Status)
+	task, exists := GlobalAppStore.GetTaskByAgentID(agentID)
+	if !exists || task.Status != types.StatusThinkingCompleted {
+		status := "None"
+		if exists { status = string(task.Status) }
+		t.Errorf("Expected status %s, got %s", types.StatusThinkingCompleted, status)
 	}
 }
 
@@ -85,10 +88,10 @@ func TestAgentSimpleRun(t *testing.T) {
  */
 func TestAgentToolExecution(t *testing.T) {
 	// 1. 準備模擬資料：第一輪呼叫工具，第二輪結束回答
-	mockEvents := []AIEvent{
+	mockEvents := []types.AIEvent{
 		{
 			Type: "action",
-			Action: &ActionData{
+			Action: &types.ActionData{
 				Name: "plan",
 				Args: map[string]interface{}{
 					"analysis": "測試計畫",
@@ -104,12 +107,13 @@ func TestAgentToolExecution(t *testing.T) {
 	}
 
 	agent := NewAgent("explorer", toolsConfig, provider)
-	taskID := CreateTask("explorer", "TEST-TOOL-AGENT")
+	agentID := "TEST-TOOL-AGENT"
+	GlobalAppStore.CreateTaskWithID(agentID, "explorer", agentID)
+
 	agentContext := &AgentContext{
-		TaskID:  taskID,
-		AgentID: "TEST-TOOL-AGENT",
-		WorkDir: "/tmp/test",
-		Store:   GlobalAppStore,
+		AgentID:         agentID,
+		WorkingDirectory: "/tmp/test",
+		Store:           GlobalAppStore,
 	}
 
 	// 3. 執行

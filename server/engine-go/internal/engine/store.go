@@ -80,15 +80,16 @@ func GenerateID(prefix string) string {
 	return fmt.Sprintf("%s-%d-%s", prefix, time.Now().UnixMilli(), randomPart)
 }
 
-func CreateTask(role string) string {
+func CreateTask(role string, agentID string) string {
 	taskID := GenerateID("TASK")
-	CreateTaskWithID(taskID, role)
+	GlobalAppStore.CreateTaskWithID(taskID, role, agentID)
 	return taskID
 }
 
-func CreateTaskWithID(taskID string, role string) {
+func (store *AppStore) CreateTaskWithID(taskID string, role string, agentID string) {
 	task := &types.Task{
 		ID:            taskID,
+		AgentID:       agentID,
 		Role:          role,
 		Status:        types.StatusPending,
 		Progress:      0,
@@ -122,171 +123,71 @@ func (store *AppStore) GetParentContext(taskID string) (*AgentContext, bool) {
 	return nil, false
 }
 
-type AgentContext struct {
-	AgentID    string       `json:"agentId"`
-	Role       string       `json:"role"`
-	TaskID     string       `json:"taskId,omitempty"`
-	Tasks      []string     `json:"tasks"`
-	Round      int          `json:"round"`
-	WorkDir    string       `json:"workDir"`
-	Messages   [][]types.Message `json:"messages"`
-	IsRunning  bool         `json:"isRunning"`  // 是否正在推論中
-	IsFinished bool         `json:"isFinished"` // 是否已徹底完成所有任務與循環
-	Store      *AppStore    `json:"-"`
-	GetState func(key string) (interface{}, bool) `json:"-"`
-	SetState func(key string, value interface{}) `json:"-"`
-}
-
-func GetOrCreateAgentContext(agentID string, taskID string, role string, workDir string) *AgentContext {
-	GlobalAppStore.Lock()
-	agentMap := GlobalAppStore.state["agents"].(map[string]*AgentContext)
+/**
+ * GetTaskByAgentID 查找指定 Agent 正在執行的任務
+ */
+func (store *AppStore) GetTaskByAgentID(agentID string) (*types.Task, bool) {
+	store.RLock()
+	defer store.RUnlock()
 	
-	var agentContext *AgentContext
-	if existingContext, exists := agentMap[agentID]; exists {
-		if taskID != "" {
-			existingContext.TaskID = taskID
-		}
-		if role != "" {
-			existingContext.Role = role
-		}
-		agentContext = existingContext
-	} else {
-		agentContext = &AgentContext{
-			AgentID:    agentID,
-			Role:       role,
-			TaskID:     taskID,
-			Tasks:      []string{},
-			Round:      0,
-			WorkDir:    workDir,
-			Messages:   [][]types.Message{{}, {}},
-			IsRunning:  false,
-			IsFinished: false,
-			Store:      GlobalAppStore,
-		}
-		agentMap[agentID] = agentContext
+	taskMap := store.state["tasks"].(map[string]*types.Task)
+	task, exists := taskMap[agentID]
+	return task, exists
+}
+
+/**
+ * GetAgentIDByTaskID 透過 TaskID 從 Store 中反向查找關聯的 AgentID
+ */
+func (store *AppStore) GetAgentIDByTaskID(taskID string) (string, bool) {
+	store.RLock()
+	defer store.RUnlock()
+
+	taskMap, isSuccessful := store.state["tasks"].(map[string]*types.Task)
+	if !isSuccessful {
+		return "", false
 	}
-	GlobalAppStore.Unlock()
-	
-	agentContext.bindStateFunctions()
-	return agentContext
-}
 
-func (agentContext *AgentContext) bindStateFunctions() {
-	if agentContext.TaskID == "" {
-		agentContext.GetState = agentContext.Store.GetState
-		agentContext.SetState = agentContext.Store.SetState
-	} else {
-		agentContext.GetState = func(key string) (interface{}, bool) {
-			agentContext.Store.RLock()
-			defer agentContext.Store.RUnlock()
-			taskMap := agentContext.Store.state["tasks"].(map[string]*types.Task)
-			task, exists := taskMap[agentContext.TaskID]
-			if !exists { return nil, false }
-			
-			switch key {
-			case "status": return task.Status, true
-			case "progress": return task.Progress, true
-			default:
-				if task.State == nil { return nil, false }
-				value, isSuccessful := task.State[key]
-				return value, isSuccessful
-			}
-		}
-		
-		agentContext.SetState = func(key string, value interface{}) {
-			agentContext.Store.Lock()
-			defer agentContext.Store.Unlock()
-			taskMap := agentContext.Store.state["tasks"].(map[string]*types.Task)
-			task, exists := taskMap[agentContext.TaskID]
-			if !exists { return }
-			
-			switch key {
-			case "status": 
-				if status, isOk := value.(types.TaskStatus); isOk { task.Status = status }
-			case "progress":
-				if progress, isOk := value.(int); isOk { task.Progress = progress }
-			default:
-				if task.State == nil { task.State = make(map[string]interface{}) }
-				task.State[key] = value
-			}
-			task.UpdatedAt = time.Now()
-		}
-	}
-}
-
-func (agentContext *AgentContext) SyncState() {
-	if agentContext.TaskID != "" {
-		if parentCtx, exists := agentContext.Store.GetParentContext(agentContext.TaskID); exists {
-			parentCtx.UpdateTaskStateWithContext(agentContext.TaskID, agentContext)
-		}
-	}
-	agentContext.Store.Lock()
-	defer agentContext.Store.Unlock()
-	agentMap := agentContext.Store.state["agents"].(map[string]*AgentContext)
-	agentMap[agentContext.AgentID] = agentContext
-}
-
-func (agentContext *AgentContext) GetMessages() [][]types.Message {
-	if agentContext.TaskID != "" {
-		agentContext.Store.RLock()
-		defer agentContext.Store.RUnlock()
-		taskMap := agentContext.Store.state["tasks"].(map[string]*types.Task)
-		if task, exists := taskMap[agentContext.TaskID]; exists {
-			return task.Messages
-		}
-	}
-	return agentContext.Messages
-}
-
-func (agentContext *AgentContext) UpdateTaskState(status types.TaskStatus, progress int) {
-	agentContext.SetState("status", status)
-	agentContext.SetState("progress", progress)
-}
-
-func (agentContext *AgentContext) IsAllTasksCompleted() bool {
-	agentContext.Store.RLock()
-	defer agentContext.Store.RUnlock()
-	taskMap := agentContext.Store.state["tasks"].(map[string]*types.Task)
-	
-	for _, taskID := range agentContext.Tasks {
-		if task, exists := taskMap[taskID]; exists {
-			if task.Status != types.StatusCompleted && task.Status != types.StatusError {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-func (agentContext *AgentContext) UpdateTaskStateWithContext(taskID string, subContext *AgentContext) {
-	agentContext.Store.Lock()
-	defer agentContext.Store.Unlock()
-	taskMap := agentContext.Store.state["tasks"].(map[string]*types.Task)
 	if task, exists := taskMap[taskID]; exists {
+		return task.AgentID, true
+	}
+	
+	return "", false
+}
+
+/**
+ * GetTask 透過 TaskID 取得任務資訊
+ */
+func (store *AppStore) GetTask(taskID string) (*types.Task, bool) {
+	store.RLock()
+	defer store.RUnlock()
+
+	taskMap, isFound := store.state["tasks"].(map[string]*types.Task)
+	if !isFound {
+		return nil, false
+	}
+
+	task, exists := taskMap[taskID]
+	return task, exists
+}
+
+/**
+ * UpdateTaskState 更新特定任務的狀態空間
+ */
+func (store *AppStore) UpdateTaskState(taskID string, key string, value interface{}) {
+	store.Lock()
+	defer store.Unlock()
+
+	taskMap, isFound := store.state["tasks"].(map[string]*types.Task)
+	if !isFound {
+		return
+	}
+
+	if task, exists := taskMap[taskID]; exists {
+		if task.State == nil {
+			task.State = make(map[string]interface{})
+		}
+		task.State[key] = value
 		task.UpdatedAt = time.Now()
-		task.Data = subContext
 	}
 }
 
-func (agentContext *AgentContext) AddMessage(role string, message types.Message) {
-	if agentContext.TaskID != "" {
-		agentContext.Store.Lock()
-		defer agentContext.Store.Unlock()
-		taskMap := agentContext.Store.state["tasks"].(map[string]*types.Task)
-		if task, exists := taskMap[agentContext.TaskID]; exists {
-			if role == "user" || role == "tool" {
-				task.Messages[0] = append(task.Messages[0], message)
-			} else {
-				task.Messages[1] = append(task.Messages[1], message)
-			}
-			task.UpdatedAt = time.Now()
-			return
-		}
-	}
-	
-	if role == "user" || role == "tool" {
-		agentContext.Messages[0] = append(agentContext.Messages[0], message)
-	} else {
-		agentContext.Messages[1] = append(agentContext.Messages[1], message)
-	}
-}
