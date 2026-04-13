@@ -65,11 +65,11 @@ func RunWithAgentID(agentID string, role string, task string) {
 }
 
 /**
- * RunAgent 負責核心的「推論執行」流程。
+ * RunAgent 負責核心的「推論執行」流程，並回傳事件串流。
  */
-func RunAgent(agentContext *AgentContext) {
+func RunAgent(agentContext *AgentContext) <-chan types.AIEvent {
 	if GlobalEngine == nil {
-		return
+		return nil
 	}
 
 	role := agentContext.Role
@@ -84,16 +84,8 @@ func RunAgent(agentContext *AgentContext) {
 	eventStream, errorValue := agent.Run(agentContext, GlobalToolbox.Declarations)
 	if errorValue != nil {
 		fmt.Printf("[Engine] ❌ 啟動失敗: %v\n", errorValue)
-		return
+		return nil
 	}
 
-	// 監聽並輸出串流
-	go func() {
-		for event := range eventStream {
-			if event.Type == "chunk" {
-				fmt.Print(event.Text)
-			}
-		}
-		fmt.Printf("\n[Engine] ✨ 任務執行完畢 (AgentID: %s)\n", agentID)
-	}()
+	return eventStream
 }

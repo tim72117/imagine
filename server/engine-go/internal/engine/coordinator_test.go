@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"imagine/engine/internal/types"
 )
 
 /**
@@ -11,19 +13,29 @@ import (
  */
 func TestCoordinator(t *testing.T) {
 	// 1. 準備模擬資料
-	mockEvents := []AIEvent{
-		{Type: "chunk", Text: "Coordinator 測試啟動！"},
+	mockEvents := [][]types.AIEvent{
+		{
+			{Type: "chunk", Text: "Coordinator 測試啟動！"},
+		},
 	}
-	provider := &MockProvider{Events: mockEvents}
+	provider := &MockProvider{Rounds: mockEvents}
 	
 	toolsConfig := &ToolsConfig{
-		Prompts:   map[string]string{"explorer": "你是一個指令協調員"},
-		RoleTools: map[string][]string{"explorer": {}},
+		Declarations: make(map[string]interface{}),
 	}
+
+	// 關鍵：在重構後的架構中，Coordinator 依賴全域單例
+	GlobalEngine = &AIBuilderEngine{
+		Provider: provider,
+		Tools:    toolsConfig,
+	}
+	GlobalAppStore = NewAppStore()
+	GlobalEventBus = NewEventBus()
+	GlobalToolbox = &Toolbox{Handlers: make(map[string]ToolHandler)}
 
 	// 2. 初始化 Coordinator
 	coordinator := NewCoordinator()
-	coordinator.Start(provider, toolsConfig)
+	coordinator.Start() // 新版不需再傳入參數
 
 	fmt.Println("    [Test] 🚀 模擬提交用戶指令到 Coordinator...")
 	
@@ -33,11 +45,11 @@ func TestCoordinator(t *testing.T) {
 
 	// 4. 等待 Coordinator 的非同步處理 (由於是背景 goroutine)
 	fmt.Println("    [Test] ⏳ 等待 Coordinator 處理中...")
-	time.Sleep(2 * time.Second)
+	time.Sleep(1 * time.Second)
 
 	// 5. 驗證全域狀態 Store 是否已建立 Task
 	GlobalAppStore.RLock()
-	tasks := GlobalAppStore.state["tasks"].(map[string]*Task)
+	tasks := GlobalAppStore.state["tasks"].(map[string]*types.Task)
 	taskCount := len(tasks)
 	GlobalAppStore.RUnlock()
 
@@ -46,13 +58,16 @@ func TestCoordinator(t *testing.T) {
 	} else {
 		fmt.Printf("    [Test] ✅ 成功驗證：Coordinator 已成功建立 %d 個任務\n", taskCount)
 		
-		// 驗證第一個任務的內容
-		for id, task := range tasks {
-			fmt.Printf("    [Test] 任務內容: ID=%s, Role=%s, Status=%s\n", id, task.Role, task.Status)
-			if task.Role != "explorer" {
-				t.Errorf("預期角色為 explorer, 但得到 %s", task.Role)
+		// 驗證角色
+		found := false
+		for _, task := range tasks {
+			if task.Role == "coordinator" {
+				found = true
+				break
 			}
-			break
+		}
+		if !found {
+			t.Error("預期角色為 coordinator, 找不到匹配的任務")
 		}
 	}
 }

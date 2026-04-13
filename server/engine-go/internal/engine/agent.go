@@ -109,7 +109,48 @@ func (agent *Agent) Run(agentContext *AgentContext, allDeclarations []types.Tool
 
 					resultEvents <- streamEvent
 					arguments, _ := streamEvent.Action.Args.(map[string]interface{})
-					_, _ = agent.Toolbox.ExecuteTool(streamEvent.Action.Name, arguments, agentContext)
+
+					// 1. 判斷工具是否為非同步
+					isAsync := false
+					for _, declaration := range allDeclarations {
+						if declaration.Name == streamEvent.Action.Name && declaration.Type == "async" {
+							isAsync = true
+							break
+						}
+					}
+
+					if isAsync {
+						// 2. 新增非同步任務 Task
+						taskID := CreateTask(agent.RoleName, agentContext.AgentID)
+						agentContext.Tasks = append(agentContext.Tasks, taskID)
+						fmt.Printf("  [%s] 📨 啟動非同步工具: %s (TaskID: %s)\n", agent.RoleName, streamEvent.Action.Name, taskID)
+						
+						// 3. 執行非同步動作 (透過 Toolbox) 並立即拿回說明文字
+						description := agent.Toolbox.RunAsyncTool(agentContext, taskID, streamEvent.Action.Name, arguments)
+						
+						// 4. 將說明寫入對話紀錄
+						agentContext.AddMessage("system", types.Message{
+							Role: "system",
+							Text: description,
+						})
+					} else {
+						// 同步執行
+						result, description, _ := agent.Toolbox.ExecuteTool(streamEvent.Action.Name, arguments, agentContext)
+						
+						// 1. 將執行說明寫入對話紀錄
+						agentContext.AddMessage("system", types.Message{
+							Role: "system",
+							Text: description,
+						})
+
+						// 2. 將回傳結果寫入對話紀錄 (原本在 Toolbox 內部做，現在移到這裡)
+						resultData, _ := json.Marshal(result.Data)
+						agentContext.AddMessage("tool", types.Message{
+							Role: "tool",
+							Text: string(resultData),
+							Tool: streamEvent.Action.Name,
+						})
+					}
 
 				} else if streamEvent.Type == "chunk" {
 					currentAssistantMessage.Text += streamEvent.Text

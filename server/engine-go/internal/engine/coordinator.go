@@ -99,8 +99,18 @@ func (coordinator *Coordinator) dispatch(message types.Message) {
 	// 3. 併入本次訊息
 	agentContext.AddMessage("user", message)
 
-	// 4. 調用全域核心執行
-	RunAgent(agentContext)
+	// 4. 調用全域核心執行並消耗串流 (防止阻塞)
+	eventStream := RunAgent(agentContext)
+	if eventStream != nil {
+		go func() {
+			for event := range eventStream {
+				if event.Type == "chunk" {
+					fmt.Print(event.Text)
+				}
+			}
+			fmt.Printf("\n[Coordinator] ✨ Agent (%s) 階段性任務推論完成\n", agentID)
+		}()
+	}
 }
 
 /**
