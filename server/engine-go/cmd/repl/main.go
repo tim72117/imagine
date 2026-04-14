@@ -7,6 +7,7 @@ import (
 	"imagine/engine/internal/config"
 	"imagine/engine/internal/engine"
 	"imagine/engine/internal/provider"
+	"imagine/engine/internal/types"
 	"os"
 	"strings"
 	"time"
@@ -57,7 +58,27 @@ func main() {
 	coordinator := engine.NewCoordinator()
 	coordinator.Start()
 
-	// 5. 啟動互動式輸入循環
+	// 5. 訂閱 Agent 推論事件並進行 UI 呈現
+	engine.GlobalEventBus.Subscribe("agent.inference", func(payload interface{}) {
+		data, _ := payload.(map[string]interface{})
+		agentEvent, _ := data["event"].(types.AIEvent)
+		role, _ := data["role"].(string)
+		
+		if agentEvent.Type == "chunk" {
+			// 即時列印灰色推論文字
+			fmt.Print("\x1b[38;5;243m" + agentEvent.Text + "\x1b[0m")
+		} else if agentEvent.Type == "action" {
+			// 列印黃色工具調用標籤
+			fmt.Printf("\n\x1b[33m[Tool] 🛠️  代理人 [%s] 調用工具: %s\x1b[0m\n", role, agentEvent.Action.Name)
+		}
+	})
+
+	engine.GlobalEventBus.Subscribe("agent.inference.done", func(payload interface{}) {
+		agentID, _ := payload.(string)
+		fmt.Printf("\n\x1b[96m[System] ✨ Agent (%s) 推論回合結束\x1b[0m\n", agentID)
+	})
+
+	// 6. 啟動互動式輸入循環
 	scanner := bufio.NewScanner(os.Stdin)
 	fmt.Print("> ")
 

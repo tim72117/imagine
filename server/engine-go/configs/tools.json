@@ -49,15 +49,23 @@
       },
       "type": "async"
     },
-    "read_file_content": {
-      "name": "read_file_content",
-      "description": "讀取專案內特定檔案內容。支援使用 list_files 生成的檔案代碼（例如 [F1]）進行精確定位。",
+    "read_file": {
+      "name": "read_file",
+      "description": "讀取專案內特定檔案內容。支援分段讀取大檔案，並具備快取優化機制。",
       "parameters": {
         "type": "OBJECT",
         "properties": {
           "path": {
             "type": "STRING",
-            "description": "檔案路徑 or 檔案代碼（例：[F1]）"
+            "description": "檔案路徑或檔案代碼（例：[F1]）"
+          },
+          "offset": {
+            "type": "NUMBER",
+            "description": "讀取起始行號（從 1 開始，預設為 1）"
+          },
+          "limit": {
+            "type": "NUMBER",
+            "description": "讀取的行數限制（預設為 500 行）"
           },
           "explanation": {
             "type": "STRING",

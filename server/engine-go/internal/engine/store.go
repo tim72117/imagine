@@ -22,7 +22,7 @@ func NewAppStore() *AppStore {
 		state: make(map[string]interface{}),
 	}
 	store.state["tasks"] = make(map[string]*types.Task)
-	store.state["agents"] = make(map[string]*AgentContext)
+	store.state["agent"] = (*ToolUseContext)(nil) // 單一代理人實體
 	return store
 }
 
@@ -42,15 +42,14 @@ func (store *AppStore) GetState(key string) (interface{}, bool) {
 }
 
 /**
- * TryLockAgent 嘗試鎖定 Agent
+ * TryLockAgent 嘗試鎖定唯一代理人
  */
 func (store *AppStore) TryLockAgent(agentID string) bool {
 	store.Lock()
 	defer store.Unlock()
 	
-	agentMap := store.state["agents"].(map[string]*AgentContext)
-	agentContext, exists := agentMap[agentID]
-	if !exists {
+	agentContext := store.state["agent"].(*ToolUseContext)
+	if agentContext == nil {
 		return true
 	}
 	
@@ -63,14 +62,13 @@ func (store *AppStore) TryLockAgent(agentID string) bool {
 }
 
 /**
- * UnlockAgent 解除 Agent 鎖定
+ * UnlockAgent 解除唯一代理人鎖定
  */
 func (store *AppStore) UnlockAgent(agentID string) {
 	store.Lock()
 	defer store.Unlock()
 	
-	agentMap := store.state["agents"].(map[string]*AgentContext)
-	if agentContext, exists := agentMap[agentID]; exists {
+	if agentContext := store.state["agent"].(*ToolUseContext); agentContext != nil {
 		agentContext.IsRunning = false
 	}
 }
@@ -108,12 +106,12 @@ func (store *AppStore) CreateTaskWithID(taskID string, role string, agentID stri
 /**
  * GetParentContext 透過搜尋所有 Agent 的 Tasks 列表來反查父代理人實體
  */
-func (store *AppStore) GetParentContext(taskID string) (*AgentContext, bool) {
+func (store *AppStore) GetParentContext(taskID string) (*ToolUseContext, bool) {
 	store.RLock()
 	defer store.RUnlock()
 	
-	agentMap := store.state["agents"].(map[string]*AgentContext)
-	for _, agentContext := range agentMap {
+	agentContext, _ := store.state["agent"].(*ToolUseContext)
+	if agentContext != nil {
 		for _, ownedTaskID := range agentContext.Tasks {
 			if ownedTaskID == taskID {
 				return agentContext, true

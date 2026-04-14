@@ -4,6 +4,15 @@ import (
 	"time"
 )
 
+// ToolUseContextInterface 定義了工具需要存取的工具執行內容介面
+type ToolUseContextInterface interface {
+	GetWorkingDirectory() string
+	GetState(key string) interface{}
+	SetState(key string, value interface{})
+	AddMessage(category string, msg Message)
+	GetReadFileState() any
+}
+
 // Message 代表對話中的單條訊息
 type Message struct {
 	Role      string `json:"role"`      // Actor Role: user, system, assistant, tool

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"imagine/engine/internal/provider"
 	"imagine/engine/internal/types"
@@ -24,7 +25,7 @@ var GlobalAgentLoader = NewAgentLoader("../.agent")
 
 func NewAgent(roleType string, toolsConfig *ToolsConfig, aiProvider provider.AIProvider) *Agent {
 	agentDefinition, errorValue := GlobalAgentLoader.GetAgent(roleType)
-	
+
 	systemPrompt := ""
 	allowedTools := []string{}
 
@@ -45,39 +46,48 @@ func NewAgent(roleType string, toolsConfig *ToolsConfig, aiProvider provider.AIP
 	}
 }
 
-func (agent *Agent) Run(agentContext *AgentContext, allDeclarations []types.ToolDeclaration) (<-chan types.AIEvent, error) {
+func (agent *Agent) Run(toolUseContext *ToolUseContext, allDeclarations []types.ToolDeclaration) (<-chan types.AIEvent, error) {
 	resultEvents := make(chan types.AIEvent, 500)
 	maxRounds := 10
-	
+
 	go func() {
 		defer close(resultEvents)
 
-		fmt.Printf("  [%s] (%s) 🧠 開始推論推論循環...\n", agent.RoleName, agentContext.AgentID)
+		fmt.Printf("  [%s] (%s) 🧠 開始推論循環...\n", agent.RoleName, toolUseContext.AgentID)
 
-		agentContext.SetState("status", types.StatusActive)
+		toolUseContext.SetState("status", types.StatusActive)
 
-		for agentContext.Round < maxRounds {
-			currentRound := agentContext.Round + 1
+		// A. 同步已完成的非同步任務結果 (從 AppStore 拉取)
+		agent.SyncTaskResults(toolUseContext)
+
+		for toolUseContext.Round < maxRounds {
+			currentRound := toolUseContext.Round + 1
 			fmt.Printf("  [%s] 🔄 第 %d 輪循環啟動\n", agent.RoleName, currentRound)
 
-			agentContext.SetState("status", types.StatusThinking)
-			agentContext.Round = currentRound
+			toolUseContext.SetState("status", types.StatusThinking)
+			toolUseContext.Round = currentRound
 
-			// 1. 組裝結構化訊息列表 (取代之前的單一 Prompt 字串)
+			// 1. 組裝結構化訊息列表
 			var messages []types.Message
-			
+
 			// A. 系統指令與環境資訊
-			environmentInformation := fmt.Sprintf("【目前工作目錄】：%s", agentContext.WorkingDirectory)
+			environmentInformation := fmt.Sprintf("【目前工作目錄】：%s", toolUseContext.WorkingDirectory)
 			finalSystemPrompt := fmt.Sprintf("%s\n\n%s\n\n%s", agent.SystemPrompt, agent.ToolPrompt, environmentInformation)
-			
+
 			messages = append(messages, types.Message{
 				Role: "system",
 				Text: finalSystemPrompt,
 			})
 
-			// B. 注入對話歷史
-			messages = append(messages, agentContext.Messages[0]...) // User/Tool Messages
-			messages = append(messages, agentContext.Messages[1]...) // Assistant Messages
+			// B. 注入對話歷史與當前暫存區 (歷史 -> 本輪思考 -> 本輪結果)
+			toolUseContext.RLock()
+			messages = append(messages, toolUseContext.Messages[0]...)
+			messages = append(messages, toolUseContext.Messages[1]...)
+			messages = append(messages, toolUseContext.Messages[2]...)
+			toolUseContext.RUnlock()
+
+			// C. 注入附件 (Contextual Memory)
+			messages = append(messages, agent.GetAttachmentMessages(toolUseContext)...)
 
 			// 2. 準備工具
 			toolDeclarations := GetTools(agent.AllowedTools, allDeclarations)
@@ -86,7 +96,6 @@ func (agent *Agent) Run(agentContext *AgentContext, allDeclarations []types.Tool
 			}
 
 			// 3. 發起推論
-			// 注意：現在傳送的是 []types.Message
 			rawEventStream, errorValue := agent.Provider.GenerateStream(context.Background(), messages, options)
 			if errorValue != nil {
 				resultEvents <- types.AIEvent{Type: "error", Text: errorValue.Error()}
@@ -99,7 +108,7 @@ func (agent *Agent) Run(agentContext *AgentContext, allDeclarations []types.Tool
 			for streamEvent := range rawEventStream {
 				if streamEvent.Type == "action" && streamEvent.Action != nil {
 					toolCalledThisRound = true
-					
+
 					currentAssistantMessage.Parts = append(currentAssistantMessage.Parts, types.Part{
 						FunctionCall: &types.FunctionCall{
 							Name: streamEvent.Action.Name,
@@ -121,31 +130,31 @@ func (agent *Agent) Run(agentContext *AgentContext, allDeclarations []types.Tool
 
 					if isAsync {
 						// 2. 新增非同步任務 Task
-						taskID := CreateTask(agent.RoleName, agentContext.AgentID)
-						agentContext.Tasks = append(agentContext.Tasks, taskID)
+						taskID := CreateTask(agent.RoleName, toolUseContext.AgentID)
+						toolUseContext.Tasks = append(toolUseContext.Tasks, taskID)
 						fmt.Printf("  [%s] 📨 啟動非同步工具: %s (TaskID: %s)\n", agent.RoleName, streamEvent.Action.Name, taskID)
-						
+
 						// 3. 執行非同步動作 (透過 Toolbox) 並立即拿回說明文字
-						description := agent.Toolbox.RunAsyncTool(agentContext, taskID, streamEvent.Action.Name, arguments)
-						
+						description := agent.Toolbox.RunAsyncTool(toolUseContext, taskID, streamEvent.Action.Name, arguments)
+
 						// 4. 將說明寫入對話紀錄
-						agentContext.AddMessage("system", types.Message{
+						toolUseContext.AddMessage("system", types.Message{
 							Role: "system",
 							Text: description,
 						})
 					} else {
 						// 同步執行
-						result, description, _ := agent.Toolbox.ExecuteTool(streamEvent.Action.Name, arguments, agentContext)
-						
+						result, description, _ := agent.Toolbox.ExecuteTool(streamEvent.Action.Name, arguments, toolUseContext)
+
 						// 1. 將執行說明寫入對話紀錄
-						agentContext.AddMessage("system", types.Message{
+						toolUseContext.AddMessage("system", types.Message{
 							Role: "system",
 							Text: description,
 						})
 
-						// 2. 將回傳結果寫入對話紀錄 (原本在 Toolbox 內部做，現在移到這裡)
+						// 2. 將回傳結果寫入對話紀錄
 						resultData, _ := json.Marshal(result.Data)
-						agentContext.AddMessage("tool", types.Message{
+						toolUseContext.AddMessage("tool", types.Message{
 							Role: "tool",
 							Text: string(resultData),
 							Tool: streamEvent.Action.Name,
@@ -159,17 +168,20 @@ func (agent *Agent) Run(agentContext *AgentContext, allDeclarations []types.Tool
 				}
 			}
 
-			// 4. 存檔與檢查
-			agentContext.AddMessage("assistant", currentAssistantMessage)
-			
+			// 4. 固定當前輪產出並提交
+			toolUseContext.AddMessage("assistant", currentAssistantMessage)
+			toolUseContext.CommitRound()
+
 			if !toolCalledThisRound {
 				fmt.Printf("  [%s] ✨ 推論結束。\n", agent.RoleName)
-				agentContext.SetState("status", types.StatusCompleted)
-				agentContext.IsFinished = true
+				toolUseContext.SetState("status", types.StatusCompleted)
+				toolUseContext.IsFinished = true
 				break
 			}
 		}
-		agentContext.Save()
+
+		// 5. 確保持久化
+		toolUseContext.Save()
 	}()
 
 	return resultEvents, nil

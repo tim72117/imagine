@@ -36,26 +36,23 @@ func main() {
 		aiProvider = provider.NewGeminiProvider(*modelName, queue)
 	}
 
-	// 3. 載入工具與提示詞配置
-	toolsConfig, errorVal := engine.LoadToolsConfig(*toolsPath)
-	if errorVal != nil {
-		fmt.Printf("Fatal: Could not load tools config from %s: %v\n", *toolsPath, errorVal)
+	// 3. 執行引擎初始化
+	if errorValue := engine.Initialize(aiProvider, *toolsPath); errorValue != nil {
+		fmt.Printf("Fatal: %v\n", errorValue)
 		os.Exit(1)
 	}
 
 	// 4. 準備推論背景 (Prompt Context)
 	userMessages := []types.Message{}
-
 	if *contextJson != "" {
 		var ctxData struct {
-			UserMessages      []types.Message `json:"userMessages"`
+			UserMessages []types.Message `json:"userMessages"`
 		}
-		if errorVal := json.Unmarshal([]byte(*contextJson), &ctxData); errorVal == nil {
+		if errorValue := json.Unmarshal([]byte(*contextJson), &ctxData); errorValue == nil {
 			userMessages = ctxData.UserMessages
 		}
 	}
 
-	// 如果沒有傳入 context 歷史，則使用單一 prompt 作為起始
 	if len(userMessages) == 0 && *prompt != "" {
 		userMessages = []types.Message{{Role: "user", Text: *prompt, Time: time.Now().UnixMilli()}}
 	}
@@ -67,27 +64,29 @@ func main() {
 
 	// 5. 建立並啟動 Coordinator
 	coordinator := engine.NewCoordinator()
-	coordinator.Start(aiProvider, toolsConfig)
+	coordinator.Start()
 
 	// 6. 提交任務 (使用指定角色)
 	if len(userMessages) > 0 {
 		for _, message := range userMessages {
-			// 在 CLI 模式下，我們直接調用 ProcessNextBatch 並傳入指定角色
-			coordinator.Submit(message.Text)
-			// 注意：coordinator.Start 內部目前是寫死 coordinator，
-			// 在手動 CLI 模式下，我們可以手動觸發 Process 以套用 roleFlag
-			coordinator.ProcessNextBatch(aiProvider, toolsConfig, *roleFlag)
+			// 直接發送到核心隊列，以便套用 CLI 指定的角色
+			engine.GlobalCommandQueue <- types.Message{
+				Role:      message.Role,
+				Text:      message.Text,
+				AgentID:   engine.GenerateID("CLI"),
+				AgentRole: *roleFlag,
+				Time:      time.Now().UnixMilli(),
+			}
 		}
 	}
 
 	// 由於 CLI 是單次執行的，我們需要等待任務處理完成
-	// 在實際應用中，這裡會對接事件監聽，目前暫時用簡單的等待或阻塞
 	if !*jsonOutput {
 		fmt.Println("[CLI] ⏳ Waiting for Agent to complete tasks...")
 	}
 	
-	// 這裡為了演示，讓進程停留一下，正常應該監聽 Coordinator 的結束訊號
-	time.Sleep(15 * time.Second)
+	// 在 CLI 模式下，簡單等待推論流結束
+	time.Sleep(10 * time.Second)
 
 	if !*jsonOutput {
 		fmt.Println("\n-----------------------------------------")

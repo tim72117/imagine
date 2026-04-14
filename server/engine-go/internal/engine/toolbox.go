@@ -1,14 +1,13 @@
 package engine
 
 import (
-	"encoding/json"
 	"fmt"
 
 	"imagine/engine/internal/types"
 )
 
 // ToolHandler 定義了工具執行的具體邏輯函式型別
-type ToolHandler func(arguments map[string]interface{}, contextInstance *AgentContext) (types.ActionResult, error)
+type ToolHandler func(arguments map[string]interface{}, contextInstance types.AgentContextInterface) (types.ActionResult, error)
 
 /**
  * Toolbox 負責管理 Go 版引擎的工具宣告與處理器
@@ -67,7 +66,7 @@ func (toolbox *Toolbox) SpawnAgent(role string) string {
 /**
  * ExecuteTool 是工具執行的統一入口。
  */
-func (toolbox *Toolbox) ExecuteTool(name string, arguments map[string]interface{}, agentContext *AgentContext) (types.ActionResult, string, error) {
+func (toolbox *Toolbox) ExecuteTool(name string, arguments map[string]interface{}, agentContext types.AgentContextInterface) (types.ActionResult, string, error) {
 	fmt.Printf("\n[Toolbox] 🛠️ 執行工具: %s\n", name)
 
 	description := fmt.Sprintf("已開始執行同步工具: %s", name)
@@ -91,7 +90,7 @@ func (toolbox *Toolbox) ExecuteTool(name string, arguments map[string]interface{
 /**
  * RunAsyncTool 在背景執行工具並在完成後通知事件總線 (EventBus)
  */
-func (toolbox *Toolbox) RunAsyncTool(agentContext *AgentContext, taskID string, toolName string, arguments map[string]interface{}) string {
+func (toolbox *Toolbox) RunAsyncTool(agentContext types.AgentContextInterface, taskID string, toolName string, arguments map[string]interface{}) string {
 	// 立即回傳說明文字給呼叫者
 	description := fmt.Sprintf("已啟動非同步工具: %s，任務編號為 %s，請留意後續進度。", toolName, taskID)
 
@@ -99,15 +98,20 @@ func (toolbox *Toolbox) RunAsyncTool(agentContext *AgentContext, taskID string, 
 		// 1. 實際執行工具邏輯
 		result, _, errorValue := toolbox.ExecuteTool(toolName, arguments, agentContext)
 
-		// 2. 廣播工具完成事件 (Coordinator 會監聽此事件並喚醒 Agent)
+		// 2. 更新全域 Task 狀態與結果 (共用 UpdateTaskState)
+		status := types.StatusCompleted
+		if errorValue != nil {
+			status = types.StatusError
+		}
+		GlobalAppStore.UpdateTaskState(taskID, "status", status)
+		GlobalAppStore.UpdateTaskState(taskID, "result", result.Data)
+
+		// 3. 廣播工具完成事件 (Coordinator 會監聽此事件並喚醒 Agent)
 		GlobalEventBus.Publish("task.finished", types.TaskFinishedEvent{
 			TaskID:   taskID,
 			ToolName: toolName,
 			Result:   result,
 		})
-
-		// 3. 背景任務結束後必須主動 Save
-		_ = agentContext.Save()
 
 		if errorValue != nil {
 			fmt.Printf("[Toolbox] ❌ 非同步工具 %s 執行失敗: %v\n", toolName, errorValue)

@@ -67,7 +67,7 @@ func RunWithAgentID(agentID string, role string, task string) {
 /**
  * RunAgent 負責核心的「推論執行」流程，並回傳事件串流。
  */
-func RunAgent(agentContext *AgentContext) <-chan types.AIEvent {
+func RunAgent(agentContext *ToolUseContext) <-chan types.AIEvent {
 	if GlobalEngine == nil {
 		return nil
 	}

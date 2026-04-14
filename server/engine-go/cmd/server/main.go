@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"imagine/engine/internal/provider"
+	"imagine/engine/internal/types"
 	"net/http"
 	"os"
 	"time"
@@ -53,7 +54,16 @@ func handleGenerate(responseWriter http.ResponseWriter, httpRequest *http.Reques
 	contextInstance, cancelFunction := context.WithCancel(httpRequest.Context())
 	defer cancelFunction()
 
-	eventStream, errorValue := aiProvider.GenerateStream(contextInstance, requestData.Prompt, requestData.Options)
+	// 2. 包裝字串 Prompt 為訊息格式
+	messages := []types.Message{
+		{
+			Role: "user",
+			Text: requestData.Prompt,
+			Time: time.Now().UnixMilli(),
+		},
+	}
+
+	eventStream, errorValue := aiProvider.GenerateStream(contextInstance, messages, requestData.Options)
 	if errorValue != nil {
 		fmt.Printf("[Go Engine] ❌ 串流生成錯誤: %v\n", errorValue)
 		http.Error(responseWriter, errorValue.Error(), http.StatusInternalServerError)
