@@ -80,7 +80,7 @@ func handleGenerate(responseWriter http.ResponseWriter, httpRequest *http.Reques
 		eventCount++
 		jsonData, _ := json.Marshal(event)
 		fmt.Fprintf(responseWriter, "data: %s\n\n", jsonData)
-		
+
 		// 2. 立即推送緩衝區
 		if flusher, isSuccessful := responseWriter.(http.Flusher); isSuccessful {
 			flusher.Flush()
@@ -97,7 +97,7 @@ func main() {
 
 	http.HandleFunc("/generate", handleGenerate)
 	fmt.Printf("[Go Engine] 🚀 伺服器啟動於 :%s\n", portNumber)
-	
+
 	if errorValue := http.ListenAndServe(":"+portNumber, nil); errorValue != nil {
 		fmt.Printf("致命錯誤: %v\n", errorValue)
 	}

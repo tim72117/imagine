@@ -111,7 +111,7 @@ func (providerInstance *OllamaProvider) GenerateStream(contextInstance context.C
 						if content, isText := message["content"].(string); isText && content != "" {
 							events <- types.AIEvent{Type: "chunk", Text: content}
 						}
-						
+
 						// 處理原生工具調用 (Tool Calls)
 						if toolCalls, isAction := message["tool_calls"].([]interface{}); isAction {
 							for _, toolCallElement := range toolCalls {

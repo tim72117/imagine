@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"imagine/engine/internal/config"
@@ -15,57 +17,77 @@ import (
 )
 
 /**
- * Go 版互動式 REPL 工具
- * 這是一個完全由 Go 核心驅動的終端機介面，支援多種 AI 提供者。
+ * CaptureProxyProvider 代理真實的 AI Provider 並攔截每輪輸入
  */
+type CaptureProxyProvider struct {
+	RealProvider provider.AIProvider
+}
+
+func (p *CaptureProxyProvider) GenerateStream(ctx context.Context, messages []types.Message, options map[string]interface{}) (<-chan types.AIEvent, error) {
+	fmt.Printf("\n\x1b[35m%s\x1b[0m\n", strings.Repeat("─", 60))
+	fmt.Printf("\x1b[35m[攔截器] 發送給 AI 的訊息 (共 %d 條):\x1b[0m\n", len(messages))
+	jsonBytes, _ := json.MarshalIndent(messages, "", "  ")
+	fmt.Printf("\x1b[90m%s\x1b[0m\n", string(jsonBytes))
+	fmt.Printf("\x1b[35m%s\x1b[0m\n\n", strings.Repeat("─", 60))
+
+	return p.RealProvider.GenerateStream(ctx, messages, options)
+}
+
 func main() {
-	// 1. 定義 CLI 參數
 	providerName := flag.String("provider", "vllm", "AI provider (claude, gemini, ollama or vllm)")
-	modelName := flag.String("model", "gemma4:e2b", "Model name")
+	modelName := flag.String("model", "", "Model name (留空從 settings.json 讀取)")
 	flag.Parse()
 
-	fmt.Println("\x1b[36m" + `
+	fmt.Println("\x1b[35m" + `
     =========================================
-    🚀 AI Builder - Go Native REPL
+    🔍 AI Builder - Debug REPL (含攔截器)
     =========================================
-    輸入指令來啟動任務，輸入 'exit' 或 'quit' 退出。
+    每輪推論前會印出發送給 AI 的完整訊息。
+    輸入 'exit' 或 'quit' 退出。
     ` + "\x1b[0m")
 
-	// 2. 準備依賴項 (根據 CLI 參數選擇不同的 Provider 實作)
-	var aiProvider provider.AIProvider
+	// 1. 建立真實 Provider
+	var realProvider provider.AIProvider
 	queue := provider.NewRequestQueue(1, 100*time.Millisecond)
 
 	switch *providerName {
 	case "vllm":
 		settings, _ := config.LoadSettings("configs/settings.json")
 		model := *modelName
-		if settings.Model != "" {
+		if model == "" {
 			model = settings.Model
 		}
-		aiProvider = provider.NewVLLMProvider(settings.VLLMBaseURL, model, queue)
+		realProvider = provider.NewVLLMProvider(settings.VLLMBaseURL, model, queue)
 	case "ollama":
 		settings, _ := config.LoadSettings("configs/settings.json")
-		aiProvider = provider.NewOllamaProvider(settings.OllamaURL, *modelName, queue)
+		model := *modelName
+		if model == "" {
+			model = settings.Model
+		}
+		realProvider = provider.NewOllamaProvider(settings.OllamaURL, model, queue)
 	case "gemini":
-		aiProvider = provider.NewGeminiProvider(*modelName, queue)
+		realProvider = provider.NewGeminiProvider(*modelName, queue)
 	case "claude":
-		aiProvider = provider.NewClaudeProvider(*modelName, queue)
+		realProvider = provider.NewClaudeProvider(*modelName, queue)
 	default:
 		fmt.Printf("\x1b[31m[Fatal] 不支援的提供者: %s\x1b[0m\n", *providerName)
 		os.Exit(1)
 	}
 
-	// 3. 執行引擎初始化 (這會注入 Provider 並啟動背景監聽)
-	if errorValue := engine.Initialize(aiProvider); errorValue != nil {
-		fmt.Printf("\x1b[31m[Fatal] %v\x1b[0m\n", errorValue)
+	// 2. 包裝攔截器
+	aiProvider := &CaptureProxyProvider{RealProvider: realProvider}
+
+	// 3. 引擎初始化
+	if err := engine.Initialize(aiProvider); err != nil {
+		fmt.Printf("\x1b[31m[Fatal] %v\x1b[0m\n", err)
 		os.Exit(1)
 	}
 
-	// 4. 建立協調者實例 並 啟動背景監聽
+	// 4. 協調者
 	coordinator := engine.NewCoordinator()
 	coordinator.Start()
 
-	// 5. 訂閱 Agent 推論事件並進行 UI 呈現
+	// 5. 訂閱推論事件
 	engine.GlobalEventBus.Subscribe("agent.inference", func(payload interface{}) {
 		data, _ := payload.(map[string]interface{})
 		agentEvent, _ := data["event"].(types.AIEvent)
@@ -85,7 +107,7 @@ func main() {
 		fmt.Printf("\n\x1b[96m[System] ✨ Agent (%s) 推論回合結束\x1b[0m\n", agentID)
 	})
 
-	// 6. 啟動互動式輸入循環
+	// 6. 互動式輸入循環
 	scanner := bufio.NewScanner(os.Stdin)
 	fmt.Print("> ")
 
@@ -96,21 +118,16 @@ func main() {
 			fmt.Print("> ")
 			continue
 		}
-
 		if strings.ToLower(input) == "exit" || strings.ToLower(input) == "quit" {
 			fmt.Println("再見！")
 			break
 		}
 
-		fmt.Printf("\x1b[90m[User] 提交指令: %s\x1b[0m\n", input)
-
-		// 透過協調者提交任務
+		fmt.Printf("\x1b[90m[User] %s\x1b[0m\n", input)
 		coordinator.Submit(input)
-
-		// 這裡使用簡單的等待，讓推論串流能完整顯示
 		time.Sleep(2 * time.Second)
 
-		// 顯示暫存的檔案變更差異
+		// 顯示暫存差異
 		if ctx, ok := engine.GetToolUseContextFromStore(); ok {
 			staged, _ := ctx.GetStagedChanges().(*enginetools.StagedChanges)
 			if staged != nil && len(staged.Files) > 0 {
@@ -122,7 +139,7 @@ func main() {
 		fmt.Print("\n> ")
 	}
 
-	if errorValue := scanner.Err(); errorValue != nil {
-		fmt.Printf("\x1b[31m[Error] 讀取輸入時發生錯誤: %v\x1b[0m\n", errorValue)
+	if err := scanner.Err(); err != nil {
+		fmt.Printf("\x1b[31m[Error] %v\x1b[0m\n", err)
 	}
 }

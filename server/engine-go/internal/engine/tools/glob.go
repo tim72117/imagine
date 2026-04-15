@@ -30,10 +30,10 @@ var GlobDeclaration = types.ToolDeclaration{
 
 // ListFiles (現在作為 Glob 工具實作)
 // 支援萬用字元模式, 例如: src/**/*.ts
-func ListFiles(arguments map[string]interface{}, agentContext types.ToolUseContextInterface) (types.ActionResult, error) {
+func ListFiles(arguments map[string]interface{}, agentContext types.ToolUseContextInterface) (types.ToolOutput, error) {
 	pattern, _ := arguments["pattern"].(string)
 	basePath, _ := arguments["path"].(string)
-	
+
 	if basePath == "" {
 		basePath = "."
 	}
@@ -46,7 +46,7 @@ func ListFiles(arguments map[string]interface{}, agentContext types.ToolUseConte
 		if err != nil {
 			return err
 		}
-		
+
 		// 取得相對於起始路徑的相對路徑
 		rel, err := filepath.Rel(root, path)
 		if err != nil {
@@ -62,12 +62,12 @@ func ListFiles(arguments map[string]interface{}, agentContext types.ToolUseConte
 		if !d.IsDir() && matchPattern(pattern, rel) {
 			matches = append(matches, rel)
 		}
-		
+
 		return nil
 	})
 
 	if err != nil {
-		return types.ActionResult{Success: false, Error: err.Error()}, nil
+		return types.NewToolOutput("Glob", types.ActionResult{Success: false, Error: err.Error()}), nil
 	}
 
 	// 限制回傳數量，避免 Token 爆炸
@@ -85,10 +85,10 @@ func ListFiles(arguments map[string]interface{}, agentContext types.ToolUseConte
 		data["guidance"] = "未找到匹配檔案。指引: 請檢查模式是否正確，或嘗試使用更廣泛的模式(例如: **/*.go)；如果是在特定目錄下搜尋，請確保 path 正確。"
 	}
 
-	return types.ActionResult{
+	return types.NewToolOutput("Glob", types.ActionResult{
 		Success: true,
 		Data:    data,
-	}, nil
+	}), nil
 }
 
 // matchPattern 實作基本的 Glob 比對

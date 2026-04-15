@@ -11,12 +11,12 @@ import (
  * AgentDefinition 代表從 .agent 檔案中讀取的原始定義
  */
 type AgentDefinition struct {
-	Role         string
-	Model        string
-	Tools        []string
-	Thought      string
+	Role          string
+	Model         string
+	Tools         []string
+	Thought       string
 	DetailedTools string
-	RawMetadata  map[string]string
+	RawMetadata   map[string]string
 }
 
 /**
@@ -91,14 +91,14 @@ func (loader *AgentLoader) parseAgentFile(content string) (*AgentDefinition, err
 			parts := strings.SplitN(line, ":", 2)
 			key := strings.TrimSpace(parts[0])
 			value := strings.TrimSpace(parts[1])
-			
+
 			switch key {
 			case "role":
 				definition.Role = value
 			case "model":
 				definition.Model = value
 			case "tools":
-				continue 
+				continue
 			default:
 				if strings.HasPrefix(line, "-") {
 					toolName := strings.TrimSpace(strings.TrimPrefix(line, "-"))

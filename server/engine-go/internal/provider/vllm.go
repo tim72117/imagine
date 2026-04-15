@@ -156,6 +156,7 @@ func (providerInstance *VLLMProvider) GenerateStream(contextInstance context.Con
 				Arguments strings.Builder
 			}
 			toolAccMap := map[int]*toolCallAcc{}
+			inThinkingBlock := false // 過濾 Gemma 4 thinking tokens
 
 			scanner := bufio.NewScanner(response.Body)
 			for scanner.Scan() {
@@ -170,7 +171,6 @@ func (providerInstance *VLLMProvider) GenerateStream(contextInstance context.Con
 
 					data := strings.TrimPrefix(line, "data: ")
 					if data == "[DONE]" {
-						fmt.Printf("[vLLM] ✅ 串流結束，累積工具調用數: %d\n", len(toolAccMap))
 						// 串流結束，emit 所有累積的工具調用
 						for _, acc := range toolAccMap {
 							if acc.Name == "" {
@@ -205,14 +205,21 @@ func (providerInstance *VLLMProvider) GenerateStream(contextInstance context.Con
 						continue
 					}
 
-					// 處理文字
+					// 處理文字（過濾 Gemma 4 thinking tokens）
 					if content, isText := delta["content"].(string); isText && content != "" {
-						events <- types.AIEvent{Type: "chunk", Text: content}
+						if strings.Contains(content, "<|channel>thought") {
+							inThinkingBlock = true
+						}
+						if !inThinkingBlock {
+							events <- types.AIEvent{Type: "chunk", Text: content}
+						}
+						if strings.Contains(content, "<channel|>") {
+							inThinkingBlock = false
+						}
 					}
 
 					// 累積工具調用片段
 					if toolCalls, isAction := delta["tool_calls"].([]interface{}); isAction {
-						fmt.Printf("[vLLM] 🔧 收到 tool_calls chunk: %v\n", toolCalls)
 						for _, toolCallElement := range toolCalls {
 							call := toolCallElement.(map[string]interface{})
 							idx := 0

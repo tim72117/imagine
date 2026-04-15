@@ -83,7 +83,7 @@ func main() {
 	if !*jsonOutput {
 		fmt.Println("[CLI] ⏳ Waiting for Agent to complete tasks...")
 	}
-	
+
 	// 在 CLI 模式下，簡單等待推論流結束
 	time.Sleep(10 * time.Second)
 

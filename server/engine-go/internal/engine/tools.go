@@ -32,9 +32,10 @@ var planDeclaration = types.ToolDeclaration{
 func init() {
 	GlobalToolbox.RegisterWithDeclaration("Glob", tools.ListFiles, tools.GlobDeclaration)
 	GlobalToolbox.RegisterWithDeclaration("Read", tools.ReadFile, tools.ReadDeclaration)
+	GlobalToolbox.RegisterWithDeclaration("edit_file", tools.EditFile, tools.EditFileDeclaration)
 	GlobalToolbox.RegisterWithDeclaration("update_file", tools.UpdateFile, tools.UpdateFileDeclaration)
 	GlobalToolbox.RegisterWithDeclaration("Browser", tools.Browser, tools.BrowserDeclaration)
-	GlobalToolbox.RegisterWithDeclaration("spawn_workers", func(arguments map[string]interface{}, agentContext types.ToolUseContextInterface) (types.ActionResult, error) {
+	GlobalToolbox.RegisterWithDeclaration("spawn_workers", func(arguments map[string]interface{}, agentContext types.ToolUseContextInterface) (types.ToolOutput, error) {
 		return tools.SpawnWorkers(arguments, agentContext, GlobalToolbox.SpawnAgent, RunWithAgentID)
 	}, tools.SpawnWorkersDeclaration)
 	GlobalToolbox.RegisterWithDeclaration("plan", nil, planDeclaration)

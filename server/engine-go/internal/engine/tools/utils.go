@@ -1,9 +1,9 @@
 package tools
 
 import (
+	"bufio"
 	"os"
 	"path/filepath"
-	"bufio"
 )
 
 /**

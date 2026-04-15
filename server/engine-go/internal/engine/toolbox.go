@@ -7,7 +7,7 @@ import (
 )
 
 // ToolHandler 定義了工具執行的具體邏輯函式型別
-type ToolHandler func(arguments map[string]interface{}, contextInstance types.ToolUseContextInterface) (types.ActionResult, error)
+type ToolHandler func(arguments map[string]interface{}, contextInstance types.ToolUseContextInterface) (types.ToolOutput, error)
 
 /**
  * Toolbox 負責管理 Go 版引擎的工具宣告與處理器
@@ -74,27 +74,22 @@ func (toolbox *Toolbox) SpawnAgent(role string) string {
 }
 
 /**
- * ExecuteTool 是工具執行的統一入口。
+ * ExecuteTool 是工具執行的統一入口，回傳 ToolOutput（含 RenderToolResult）。
  */
-func (toolbox *Toolbox) ExecuteTool(name string, arguments map[string]interface{}, agentContext types.ToolUseContextInterface) (types.ActionResult, string, error) {
+func (toolbox *Toolbox) ExecuteTool(name string, arguments map[string]interface{}, agentContext types.ToolUseContextInterface) (types.ToolOutput, error) {
 	fmt.Printf("\n[Toolbox] 🛠️ 執行工具: %s\n", name)
-
-	description := fmt.Sprintf("已開始執行同步工具: %s", name)
 
 	handler, isFound := toolbox.Handlers[name]
 	if !isFound {
-		errorValue := fmt.Errorf("找不到名為 %s 的工具處理器", name)
-		fmt.Printf("[Toolbox] ❌ %v\n", errorValue)
-		return types.ActionResult{Success: false, Error: errorValue.Error()}, description, errorValue
+		err := fmt.Errorf("找不到名為 %s 的工具處理器", name)
+		return types.NewToolOutput(name, types.ActionResult{Success: false, Error: err.Error()}), err
 	}
 
-	result, errorValue := handler(arguments, agentContext)
+	output, errorValue := handler(arguments, agentContext)
 	if errorValue != nil {
 		fmt.Printf("[Toolbox] ❌ 執行出錯: %v\n", errorValue)
-		return result, description, errorValue
 	}
-
-	return result, description, nil
+	return output, errorValue
 }
 
 /**
@@ -106,9 +101,10 @@ func (toolbox *Toolbox) RunAsyncTool(agentContext types.ToolUseContextInterface,
 
 	go func() {
 		// 1. 實際執行工具邏輯
-		result, _, errorValue := toolbox.ExecuteTool(toolName, arguments, agentContext)
+		output, errorValue := toolbox.ExecuteTool(toolName, arguments, agentContext)
+		result := output.GetActionResult()
 
-		// 2. 更新全域 Task 狀態與結果 (共用 UpdateTaskState)
+		// 2. 更新全域 Task 狀態與結果
 		status := types.StatusCompleted
 		if errorValue != nil {
 			status = types.StatusError
@@ -116,7 +112,7 @@ func (toolbox *Toolbox) RunAsyncTool(agentContext types.ToolUseContextInterface,
 		GlobalAppStore.UpdateTaskState(taskID, "status", status)
 		GlobalAppStore.UpdateTaskState(taskID, "result", result.Data)
 
-		// 3. 廣播工具完成事件 (Coordinator 會監聽此事件並喚醒 Agent)
+		// 3. 廣播工具完成事件
 		GlobalEventBus.Publish("task.finished", types.TaskFinishedEvent{
 			TaskID:   taskID,
 			ToolName: toolName,

@@ -42,7 +42,7 @@ func RunWithAgentID(agentID string, role string, task string) {
 	// 1. 準備上下文
 	workingDirectory, _ := os.Getwd()
 	agentContext := CreateToolUseContext(agentID, role, task, workingDirectory)
-	
+
 	// 直接併入初始訊息 (不經過隊列，維持最簡潔的啟動路徑)
 	agentContext.AddMessage("user", types.Message{
 		Role:    "user",

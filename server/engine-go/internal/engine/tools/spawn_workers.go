@@ -49,14 +49,14 @@ type RunAgentFunc func(agentID string, role string, goal string)
 /**
  * SpawnWorkers 工具實作
  */
-func SpawnWorkers(arguments map[string]interface{}, agentContext types.ToolUseContextInterface, spawnAgent SpawnAgentFunc, runAgent RunAgentFunc) (types.ActionResult, error) {
+func SpawnWorkers(arguments map[string]interface{}, agentContext types.ToolUseContextInterface, spawnAgent SpawnAgentFunc, runAgent RunAgentFunc) (types.ToolOutput, error) {
 	workers, isSuccessful := arguments["workers"].([]interface{})
 	if !isSuccessful {
-		return types.ActionResult{Success: false, Error: "缺少 workers 參數"}, nil
+		return types.NewToolOutput("spawn_workers", types.ActionResult{Success: false, Error: "缺少 workers 參數"}), nil
 	}
 
 	explanation, _ := arguments["explanation"].(string)
-	
+
 	var spawnedTaskDescriptions []string
 	for _, workerElement := range workers {
 		workerMap, isSuccessful := workerElement.(map[string]interface{})
@@ -74,11 +74,11 @@ func SpawnWorkers(arguments map[string]interface{}, agentContext types.ToolUseCo
 		spawnedTaskDescriptions = append(spawnedTaskDescriptions, fmt.Sprintf("%s (%s)", role, taskDescription))
 	}
 
-	return types.ActionResult{
+	return types.NewToolOutput("spawn_workers", types.ActionResult{
 		Success: true,
 		Data: map[string]interface{}{
 			"explanation": explanation,
 			"spawned":     spawnedTaskDescriptions,
 		},
-	}, nil
+	}), nil
 }

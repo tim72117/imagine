@@ -71,7 +71,7 @@ func (coordinator *Coordinator) Start() {
 			if message.Text != "" {
 				toolUseContext.AddMessage(message.Role, message)
 			}
-				
+
 			// C. 執行調派
 			coordinator.dispatch(toolUseContext)
 		}
@@ -93,7 +93,7 @@ func (coordinator *Coordinator) dispatch(toolUseContext *ToolUseContext) {
 					"event":   event,
 				})
 			}
-			
+
 			// 發送推論結束信號
 			GlobalEventBus.Publish("agent.inference.done", toolUseContext.AgentID)
 		}()

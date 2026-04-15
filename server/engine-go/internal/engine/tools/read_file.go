@@ -72,7 +72,7 @@ func (s *ReadFileState) Set(path string, state *FileState) {
 /**
  * ReadFile 工具實作
  */
-func ReadFile(arguments map[string]interface{}, agentContext types.ToolUseContextInterface) (types.ActionResult, error) {
+func ReadFile(arguments map[string]interface{}, agentContext types.ToolUseContextInterface) (types.ToolOutput, error) {
 	pathArgument, _ := arguments["file_path"].(string)
 	offset, _ := arguments["offset"].(float64)
 	limit, _ := arguments["limit"].(float64)
@@ -93,13 +93,13 @@ func ReadFile(arguments map[string]interface{}, agentContext types.ToolUseContex
 	if cache != nil {
 		if existing, exists := cache.Get(fullPath); exists {
 			if currentMtime == existing.Timestamp && offset == existing.Offset && limit == existing.Limit {
-				return types.ActionResult{
+				return types.NewToolOutput("Read", types.ActionResult{
 					Success: true,
 					Data: map[string]interface{}{
 						"type": "file_unchanged",
 						"path": pathArgument,
 					},
-				}, nil
+				}), nil
 			}
 		}
 	}
@@ -108,12 +108,12 @@ func ReadFile(arguments map[string]interface{}, agentContext types.ToolUseContex
 	file, err := os.Open(fullPath)
 	if err != nil {
 		errorMessage := fmt.Sprintf("%v. 指引: 如果你確信檔案存在但路徑不對，請嘗試使用 Glob(pattern=\"**/%s\") 進行全域檢索。", err, filepath.Base(pathArgument))
-		return types.ActionResult{Success: false, Error: errorMessage}, nil
+		return types.NewToolOutput("Read", types.ActionResult{Success: false, Error: errorMessage}), nil
 	}
 	defer file.Close()
 
 	totalLines, _, _ := getFileMetadata(fullPath)
-	
+
 	file.Seek(0, 0)
 	scanner := bufio.NewScanner(file)
 	lineOffset := int(offset)
@@ -156,7 +156,7 @@ func ReadFile(arguments map[string]interface{}, agentContext types.ToolUseContex
 	triggers = append(triggers, fullPath)
 	agentContext.SetState("nestedMemoryAttachmentTriggers", triggers)
 
-	return types.ActionResult{
+	return types.NewToolOutput("Read", types.ActionResult{
 		Success: true,
 		Data: map[string]interface{}{
 			"type":       "text",
@@ -166,5 +166,5 @@ func ReadFile(arguments map[string]interface{}, agentContext types.ToolUseContex
 			"totalLines": totalLines,
 			"mtimeMs":    currentMtime,
 		},
-	}, nil
+	}), nil
 }

@@ -15,27 +15,32 @@ import (
  * 遵循原則：不自帶鎖 (No Lock)，併發安全由 Agent 執行序確保。
  */
 type ToolUseContext struct {
-	AgentID          string                             `json:"agentId"`
-	Role             string                             `json:"role"`
-	Goal             string                             `json:"goal"`
-	Tasks            []string                           `json:"tasks"`
-	Round            int                                `json:"round"`
-	WorkingDirectory string                             `json:"workingDirectory"`
-	Messages         [][]types.Message                  `json:"messages"` // [0: 歷史, 1: 思考中, 2: 暫存結果]
-	IsRunning        bool                               `json:"isRunning"`
-	IsFinished       bool                               `json:"isFinished"`
-	Status           types.TaskStatus                   `json:"status"`
-	Store            *AppStore                          `json:"-"`
-	
+	AgentID          string            `json:"agentId"`
+	Role             string            `json:"role"`
+	Goal             string            `json:"goal"`
+	Tasks            []string          `json:"tasks"`
+	Round            int               `json:"round"`
+	WorkingDirectory string            `json:"workingDirectory"`
+	Messages         [][]types.Message `json:"messages"` // [0: 歷史, 1: 思考中, 2: 暫存結果]
+	IsRunning        bool              `json:"isRunning"`
+	IsFinished       bool              `json:"isFinished"`
+	Status           types.TaskStatus  `json:"status"`
+	Store            *AppStore         `json:"-"`
+
 	GetStateFunc func(key string) (interface{}, bool) `json:"-"`
 	SetStateFunc func(key string, value interface{})  `json:"-"`
 
 	// 執行期狀態
 	readFileState *tools.ReadFileState `json:"-"`
+	stagedChanges *tools.StagedChanges `json:"-"`
 }
 
 func (contextInstance *ToolUseContext) GetReadFileState() any {
 	return contextInstance.readFileState
+}
+
+func (contextInstance *ToolUseContext) GetStagedChanges() any {
+	return contextInstance.stagedChanges
 }
 
 func (contextInstance *ToolUseContext) GetWorkingDirectory() string {
@@ -67,7 +72,7 @@ func GetToolUseContextFromStore() (*ToolUseContext, bool) {
 	if contextInstance == nil {
 		return nil, false
 	}
-	
+
 	return contextInstance, true
 }
 
@@ -91,6 +96,7 @@ func CreateToolUseContext(agentID string, role string, goal string, workingDirec
 		IsFinished:       false,
 		Status:           types.StatusPending,
 		readFileState:    tools.NewReadFileState(),
+		stagedChanges:    tools.NewStagedChanges(),
 	}
 
 	// 繼承歷史 (AppStore 的鎖仍需保留以保護全域狀態)
@@ -122,7 +128,7 @@ func LoadToolUseContext(agentID string) (*ToolUseContext, error) {
  */
 func (contextInstance *ToolUseContext) bindStateFunctions() {
 	task, isFound := GlobalAppStore.GetTask(contextInstance.AgentID)
-	
+
 	if !isFound {
 		contextInstance.GetStateFunc = GlobalAppStore.GetState
 		contextInstance.SetStateFunc = GlobalAppStore.SetState
@@ -177,7 +183,7 @@ func (contextInstance *ToolUseContext) AddMessage(role string, message types.Mes
 func (contextInstance *ToolUseContext) CommitRound() {
 	contextInstance.Messages[0] = append(contextInstance.Messages[0], contextInstance.Messages[1]...)
 	contextInstance.Messages[0] = append(contextInstance.Messages[0], contextInstance.Messages[2]...)
-	
+
 	contextInstance.Messages[1] = []types.Message{}
 	contextInstance.Messages[2] = []types.Message{}
 }
@@ -192,7 +198,7 @@ func (contextInstance *ToolUseContext) Save() error {
 	// 過濾僅屬於本 AgentID 的訊息以符合增量設計
 	incrementalContext := *contextInstance
 	incrementalContext.Messages = [][]types.Message{{}, {}, {}}
-	
+
 	for i := 0; i < 3; i++ {
 		for _, msg := range contextInstance.Messages[i] {
 			if msg.AgentID == contextInstance.AgentID {

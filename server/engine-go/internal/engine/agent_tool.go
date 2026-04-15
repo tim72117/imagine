@@ -13,21 +13,21 @@ import (
  */
 func (agent *Agent) SyncTaskResults(agentContext *ToolUseContext) {
 	var activeTasks []string
-	
+
 	for _, taskID := range agentContext.Tasks {
 		task, exists := GlobalAppStore.GetTask(taskID)
-		
+
 		// 檢查任務是否已完成或出錯
 		if exists && (task.Status == types.StatusCompleted || task.Status == types.StatusError) {
 			fmt.Printf("  [%s] 📥 同步已完成的任務結果: %s\n", agent.RoleName, taskID)
-			
+
 			// 1. 從 State 中提取結果 (優先自 "result" key 獲取)
 			targetData := task.Data
 			if task.State != nil && task.State["result"] != nil {
 				targetData = task.State["result"]
 			}
 			resultData, _ := json.Marshal(targetData)
-			
+
 			// 2. 獲取工具名稱 (優先從 State 獲取，否則使用 Task.Role)
 			toolName, _ := task.State["tool"].(string)
 			if toolName == "" {
@@ -41,11 +41,11 @@ func (agent *Agent) SyncTaskResults(agentContext *ToolUseContext) {
 				Tool: toolName,
 				Time: time.Now().UnixMilli(),
 			})
-			
+
 			// 任務已處理，不加入 activeTasks (即從待辦清單移除)
 			continue
 		}
-		
+
 		// 尚未完成的任務保留在追蹤清單中
 		activeTasks = append(activeTasks, taskID)
 	}
@@ -59,7 +59,7 @@ func (agent *Agent) SyncTaskResults(agentContext *ToolUseContext) {
  */
 func (agent *Agent) GetAttachmentMessages(agentContext *ToolUseContext) []types.Message {
 	var messages []types.Message
-	
+
 	// 1. 從 ReadFileState 獲取檔案內容附件
 	cache, _ := agentContext.GetReadFileState().(*tools.ReadFileState)
 	if cache != nil {

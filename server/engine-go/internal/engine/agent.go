@@ -142,21 +142,16 @@ func (agent *Agent) Run(toolUseContext *ToolUseContext, allDeclarations []types.
 						})
 					} else {
 						// 同步執行
-						result, description, _ := agent.Toolbox.ExecuteTool(streamEvent.Action.Name, arguments, toolUseContext)
+						output, _ := agent.Toolbox.ExecuteTool(streamEvent.Action.Name, arguments, toolUseContext)
+						resultEvents <- types.AIEvent{Type: "tool_result", Output: output}
+						result := output.GetActionResult()
 
-						// 1. 將執行說明寫入對話紀錄
-						toolUseContext.AddMessage("system", types.Message{
-							Role: "system",
-							Text: description,
-						})
-
-						// 2. 將回傳結果寫入對話紀錄
+						// 將回傳結果寫入對話紀錄 (緊接在 assistant tool_calls 後，符合 OpenAI 格式)
 						var messageText string
 						if result.Success {
 							resultData, _ := json.Marshal(result.Data)
 							messageText = string(resultData)
 						} else {
-							// 執行失敗時，回傳錯誤訊息給 AI
 							messageText = fmt.Sprintf("Error: %s", result.Error)
 						}
 
@@ -192,6 +187,3 @@ func (agent *Agent) Run(toolUseContext *ToolUseContext, allDeclarations []types.
 
 	return resultEvents, nil
 }
-
-
-

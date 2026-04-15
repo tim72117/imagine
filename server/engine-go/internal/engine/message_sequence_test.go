@@ -43,10 +43,10 @@ func (mock *MessageSequenceMockProvider) GenerateStream(ctx context.Context, mes
 func TestMessageSequenceIncrementalCheck(t *testing.T) {
 	// --- 1. 定義預期的最終完整訊息序列 (Master Sequence) ---
 	expectedMasterSequence := []types.Message{
-		{Role: "system", Text: "System Prompt"},    // 0: System 指令 (動態組裝，我們比對 Role 即可)
-		{Role: "user", Text: "請列出檔案"},         // 1: User 提問
-		{Role: "assistant", Text: "正在列出檔案"},   // 2: 第 1 輪產出的助理思考 (含 Action)
-		{Role: "system", Text: "已開始執行同步工具: list_files"}, // 3: 工具執行後的描述 (Messages[2])
+		{Role: "system", Text: "System Prompt"},                             // 0: System 指令 (動態組裝，我們比對 Role 即可)
+		{Role: "user", Text: "請列出檔案"},                                       // 1: User 提問
+		{Role: "assistant", Text: "正在列出檔案"},                                 // 2: 第 1 輪產出的助理思考 (含 Action)
+		{Role: "system", Text: "已開始執行同步工具: list_files"},                     // 3: 工具執行後的描述 (Messages[2])
 		{Role: "tool", Tool: "list_files", Text: "{\"files\":[\"a.txt\"]}"}, // 4: 工具原始結果 (Messages[2])
 	}
 
@@ -81,7 +81,8 @@ func TestMessageSequenceIncrementalCheck(t *testing.T) {
 	// --- 4. 執行推論 ---
 	agent := NewAgent("explorer", mockProvider)
 	eventStream, _ := agent.Run(agentContext, GlobalToolbox.Declarations)
-	for range eventStream { }
+	for range eventStream {
+	}
 
 	// --- 5. 逐輪片段比對驗證 (Slice Comparison) ---
 	t.Logf("推論結束，總共發起 %d 輪模型調用", len(mockProvider.CapturedMessages))
@@ -93,7 +94,7 @@ func TestMessageSequenceIncrementalCheck(t *testing.T) {
 
 	for roundIdx, captured := range mockProvider.CapturedMessages {
 		expectedLen := expectedStepLengths[roundIdx]
-		
+
 		t.Logf("---- [Round %d] 驗證 (預期長度: %d) ----", roundIdx+1, expectedLen)
 
 		if len(captured) != expectedLen {
@@ -102,10 +103,12 @@ func TestMessageSequenceIncrementalCheck(t *testing.T) {
 
 		// 逐一內容比對
 		for msgIdx, msg := range captured {
-			if msgIdx >= expectedLen { break }
-			
+			if msgIdx >= expectedLen {
+				break
+			}
+
 			expected := expectedMasterSequence[msgIdx]
-			
+
 			// 1. 檢查角色
 			if msg.Role != expected.Role {
 				t.Errorf("Round %d, Msg %d: 角色不匹配。預期 %s, 實際 %s", roundIdx+1, msgIdx, expected.Role, msg.Role)

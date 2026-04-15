@@ -47,16 +47,16 @@ func (store *AppStore) GetState(key string) (interface{}, bool) {
 func (store *AppStore) TryLockAgent(agentID string) bool {
 	store.Lock()
 	defer store.Unlock()
-	
+
 	agentContext, _ := store.state["agent"].(*ToolUseContext)
 	if agentContext == nil {
 		return true
 	}
-	
+
 	if agentContext.IsRunning {
 		return false
 	}
-	
+
 	agentContext.IsRunning = true
 	return true
 }
@@ -67,7 +67,7 @@ func (store *AppStore) TryLockAgent(agentID string) bool {
 func (store *AppStore) UnlockAgent(agentID string) {
 	store.Lock()
 	defer store.Unlock()
-	
+
 	if agentContext, ok := store.state["agent"].(*ToolUseContext); ok && agentContext != nil {
 		agentContext.IsRunning = false
 	}
@@ -86,15 +86,15 @@ func CreateTask(role string, agentID string) string {
 
 func (store *AppStore) CreateTaskWithID(taskID string, role string, agentID string) {
 	task := &types.Task{
-		ID:            taskID,
-		AgentID:       agentID,
-		Role:          role,
-		Status:        types.StatusPending,
-		Progress:      0,
-		Messages:      [][]types.Message{{}, {}},
-		CreatedAt:     time.Now(),
-		UpdatedAt:     time.Now(),
-		State:         make(map[string]interface{}),
+		ID:        taskID,
+		AgentID:   agentID,
+		Role:      role,
+		Status:    types.StatusPending,
+		Progress:  0,
+		Messages:  [][]types.Message{{}, {}},
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+		State:     make(map[string]interface{}),
 	}
 
 	store.Lock()
@@ -109,7 +109,7 @@ func (store *AppStore) CreateTaskWithID(taskID string, role string, agentID stri
 func (store *AppStore) GetParentContext(taskID string) (*ToolUseContext, bool) {
 	store.RLock()
 	defer store.RUnlock()
-	
+
 	agentContext, _ := store.state["agent"].(*ToolUseContext)
 	if agentContext != nil {
 		for _, ownedTaskID := range agentContext.Tasks {
@@ -127,7 +127,7 @@ func (store *AppStore) GetParentContext(taskID string) (*ToolUseContext, bool) {
 func (store *AppStore) GetTaskByAgentID(agentID string) (*types.Task, bool) {
 	store.RLock()
 	defer store.RUnlock()
-	
+
 	taskMap := store.state["tasks"].(map[string]*types.Task)
 	task, exists := taskMap[agentID]
 	return task, exists
@@ -148,7 +148,7 @@ func (store *AppStore) GetAgentIDByTaskID(taskID string) (string, bool) {
 	if task, exists := taskMap[taskID]; exists {
 		return task.AgentID, true
 	}
-	
+
 	return "", false
 }
 
@@ -206,4 +206,3 @@ func (store *AppStore) UpdateTaskStatus(taskID string, status types.TaskStatus) 
 		task.UpdatedAt = time.Now()
 	}
 }
-

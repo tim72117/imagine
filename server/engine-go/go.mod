@@ -2,7 +2,10 @@ module imagine/engine
 
 go 1.25.5
 
-require github.com/go-rod/rod v0.116.2
+require (
+	github.com/go-rod/rod v0.116.2
+	github.com/sergi/go-diff v1.4.0
+)
 
 require (
 	github.com/ysmood/fetchup v0.2.3 // indirect

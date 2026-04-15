@@ -29,8 +29,8 @@ var BrowserDeclaration = types.ToolDeclaration{
 				"description": "導航目標網址",
 			},
 			"coordinate": map[string]interface{}{
-				"type":  "ARRAY",
-				"items": map[string]interface{}{"type": "NUMBER"},
+				"type":        "ARRAY",
+				"items":       map[string]interface{}{"type": "NUMBER"},
 				"description": "[x, y] 座標",
 			},
 			"text": map[string]interface{}{
@@ -69,22 +69,26 @@ func getOrLaunchBrowser() (*rod.Page, error) {
 /**
  * Browser 工具實作 (集中式分發器)
  */
-func Browser(arguments map[string]interface{}, agentContext types.ToolUseContextInterface) (types.ActionResult, error) {
+func Browser(arguments map[string]interface{}, agentContext types.ToolUseContextInterface) (types.ToolOutput, error) {
 	action, _ := arguments["action"].(string)
-	
+
 	p, err := getOrLaunchBrowser()
 	if err != nil {
-		return types.ActionResult{Success: false, Error: fmt.Sprintf("啟動瀏覽器失敗: %v", err)}, nil
+		return types.NewToolOutput("Browser", types.ActionResult{Success: false, Error: fmt.Sprintf("啟動瀏覽器失敗: %v", err)}), nil
+	}
+
+	wrap := func(r types.ActionResult) types.ToolOutput {
+		return types.NewToolOutput("Browser", r)
 	}
 
 	switch action {
 	case "navigate":
 		url, _ := arguments["url"].(string)
 		if url == "" {
-			return types.ActionResult{Success: false, Error: "navigate 動作需要 url 參數"}, nil
+			return wrap(types.ActionResult{Success: false, Error: "navigate 動作需要 url 參數"}), nil
 		}
 		p.MustNavigate(url).MustWaitStable()
-		return types.ActionResult{Success: true, Data: map[string]interface{}{"status": "success", "current_url": p.MustInfo().URL}}, nil
+		return wrap(types.ActionResult{Success: true, Data: map[string]interface{}{"status": "success", "current_url": p.MustInfo().URL}}), nil
 
 	case "click":
 		// 優先支援座標
@@ -92,39 +96,38 @@ func Browser(arguments map[string]interface{}, agentContext types.ToolUseContext
 			x := coord[0].(float64)
 			y := coord[1].(float64)
 			p.Mouse.MustMoveTo(x, y).MustClick(proto.InputMouseButtonLeft)
-			return types.ActionResult{Success: true, Data: map[string]interface{}{"status": "clicked", "at": []float64{x, y}}}, nil
+			return wrap(types.ActionResult{Success: true, Data: map[string]interface{}{"status": "clicked", "at": []float64{x, y}}}), nil
 		}
 		// 其次支援選擇器
 		if selector, ok := arguments["selector"].(string); ok && selector != "" {
 			p.MustElement(selector).MustClick()
-			return types.ActionResult{Success: true, Data: map[string]interface{}{"status": "clicked", "selector": selector}}, nil
+			return wrap(types.ActionResult{Success: true, Data: map[string]interface{}{"status": "clicked", "selector": selector}}), nil
 		}
-		return types.ActionResult{Success: false, Error: "click 動作需要 coordinate 或 selector 參數"}, nil
+		return wrap(types.ActionResult{Success: false, Error: "click 動作需要 coordinate 或 selector 參數"}), nil
 
 	case "type":
 		text, _ := arguments["text"].(string)
 		if selector, ok := arguments["selector"].(string); ok && selector != "" {
 			p.MustElement(selector).MustInput(text)
-			return types.ActionResult{Success: true, Data: map[string]interface{}{"status": "typed", "text": text}}, nil
+			return wrap(types.ActionResult{Success: true, Data: map[string]interface{}{"status": "typed", "text": text}}), nil
 		}
 		// 若無選擇器，直接在目前焦點輸入字串
 		p.MustInsertText(text)
-		return types.ActionResult{Success: true, Data: map[string]interface{}{"status": "typed", "text": text}}, nil
+		return wrap(types.ActionResult{Success: true, Data: map[string]interface{}{"status": "typed", "text": text}}), nil
 
 	case "scroll":
-		// 修正: MustScroll 只需要 x, y 兩個參數
 		p.Mouse.MustScroll(0, 500)
-		return types.ActionResult{Success: true, Data: map[string]interface{}{"status": "scrolled"}}, nil
+		return wrap(types.ActionResult{Success: true, Data: map[string]interface{}{"status": "scrolled"}}), nil
 
 	case "screenshot":
 		timestamp := time.Now().Unix()
 		fileName := fmt.Sprintf("screenshot_%d.png", timestamp)
 		outputPath := filepath.Join(agentContext.GetWorkingDirectory(), "screenshots")
 		_ = os.MkdirAll(outputPath, 0755)
-		
+
 		fullPath := filepath.Join(outputPath, fileName)
 		p.MustScreenshot(fullPath)
-		return types.ActionResult{Success: true, Data: map[string]interface{}{"status": "screenshot_taken", "path": fullPath}}, nil
+		return wrap(types.ActionResult{Success: true, Data: map[string]interface{}{"status": "screenshot_taken", "path": fullPath}}), nil
 
 	case "get_html":
 		html := p.MustHTML()
@@ -132,9 +135,9 @@ func Browser(arguments map[string]interface{}, agentContext types.ToolUseContext
 		if len(html) > 5000 {
 			html = html[:5000] + "...(truncated)"
 		}
-		return types.ActionResult{Success: true, Data: map[string]interface{}{"html": html}}, nil
+		return wrap(types.ActionResult{Success: true, Data: map[string]interface{}{"html": html}}), nil
 
 	default:
-		return types.ActionResult{Success: false, Error: fmt.Sprintf("不支援的瀏覽器動作: %s", action)}, nil
+		return wrap(types.ActionResult{Success: false, Error: fmt.Sprintf("不支援的瀏覽器動作: %s", action)}), nil
 	}
 }

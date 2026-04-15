@@ -19,15 +19,10 @@ func TestCoordinator(t *testing.T) {
 		},
 	}
 	provider := &MockProvider{Rounds: mockEvents}
-	
-	toolsConfig := &ToolsConfig{
-		Declarations: make(map[string]interface{}),
-	}
 
 	// 關鍵：在重構後的架構中，Coordinator 依賴全域單例
 	GlobalEngine = &AIBuilderEngine{
 		Provider: provider,
-		Tools:    toolsConfig,
 	}
 	GlobalAppStore = NewAppStore()
 	GlobalEventBus = NewEventBus()
@@ -38,7 +33,7 @@ func TestCoordinator(t *testing.T) {
 	coordinator.Start() // 新版不需再傳入參數
 
 	fmt.Println("    [Test] 🚀 模擬提交用戶指令到 Coordinator...")
-	
+
 	// 3. 提交指令
 	testPrompt := "啟動自動化測試任務"
 	coordinator.Submit(testPrompt)
@@ -57,7 +52,7 @@ func TestCoordinator(t *testing.T) {
 		t.Error("❌ 錯誤：Coordinator 提交指令後未建立任何 Task")
 	} else {
 		fmt.Printf("    [Test] ✅ 成功驗證：Coordinator 已成功建立 %d 個任務\n", taskCount)
-		
+
 		// 驗證角色
 		found := false
 		for _, task := range tasks {

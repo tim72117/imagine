@@ -18,7 +18,7 @@ import (
 type MockProvider struct {
 	mu           sync.Mutex
 	CallCount    int
-	Rounds       [][]types.AIEvent 
+	Rounds       [][]types.AIEvent
 	currentRound int
 	LastMessages []types.Message // 記錄最後一次收到的訊息以便驗證
 }
@@ -82,7 +82,7 @@ func (m *MockProvider) GenerateStream(ctx context.Context, messages []types.Mess
  * TestAsyncToolWorkflow 完整測試「非同步工具 (bash)」的執行、等待、喚醒與讀取流程。
  */
 func TestAsyncToolWorkflow(t *testing.T) {
-	_ = os.RemoveAll("sessions") 
+	_ = os.RemoveAll("sessions")
 	GlobalAppStore = NewAppStore()
 	GlobalEventBus = NewEventBus()
 	GlobalToolbox = &Toolbox{
@@ -91,7 +91,7 @@ func TestAsyncToolWorkflow(t *testing.T) {
 			{Name: "bash", Type: "async"},
 		},
 	}
-	
+
 	testAgentID := GenerateID("TEST-BASH")
 	mockProvider := &MockProvider{}
 
@@ -99,9 +99,9 @@ func TestAsyncToolWorkflow(t *testing.T) {
 	GlobalToolbox.Register("bash", func(args map[string]interface{}, ctx types.ToolUseContextInterface) (types.ActionResult, error) {
 		fmt.Printf("    [Check 1] 🔧 執行指令: %v\n", args["command"])
 		// 模擬長耗時工作
-		time.Sleep(1 * time.Second) 
+		time.Sleep(1 * time.Second)
 		fmt.Println("    [Check 3] 模擬背景指令執行完成...")
-		
+
 		return types.ActionResult{
 			Success: true,
 			Data:    map[string]interface{}{"output": "Build Successful", "exitCode": 0},
@@ -118,17 +118,18 @@ func TestAsyncToolWorkflow(t *testing.T) {
 	wd, _ := os.Getwd()
 	agentCtx := CreateToolUseContext(testAgentID, "coder", "幫我編譯專案", wd)
 	agentCtx.AddMessage("user", types.Message{Role: "user", Text: "幫我編譯專案", AgentID: testAgentID})
-	
+
 	fmt.Printf("[Test] 🚀 啟動非同步工具測試 (bash, ID: %s)...\n", testAgentID)
 
 	// 執行第一波
 	stream1 := RunAgent(agentCtx)
-	for range stream1 { }
+	for range stream1 {
+	}
 
 	// 模擬休眠
 	fmt.Println("[Test] 💤 模擬 Agent 進入休眠...")
 	GlobalAppStore.Lock()
-	GlobalAppStore.state["agent"] = (*ToolUseContext)(nil) 
+	GlobalAppStore.state["agent"] = (*ToolUseContext)(nil)
 	GlobalAppStore.Unlock()
 
 	// 驗證持久化
@@ -139,8 +140,8 @@ func TestAsyncToolWorkflow(t *testing.T) {
 
 	// 模擬完成
 	fmt.Println("[Check 3] 等待 bash 完成事件...")
-	time.Sleep(2 * time.Second) 
-	
+	time.Sleep(2 * time.Second)
+
 	// 重新載入檢查喚醒
 	agentCtx, _ = LoadToolUseContext(testAgentID)
 	fmt.Printf("[Check 4] 當前 Round: %d, CallCount: %d\n", agentCtx.Round, mockProvider.CallCount)
@@ -153,7 +154,7 @@ func TestAsyncToolWorkflow(t *testing.T) {
 	assistantMessages := agentCtx.Messages[1]
 	finalResponse := assistantMessages[len(assistantMessages)-1].Text
 	fmt.Printf("    [Check 5] 最終回覆: %s\n", finalResponse)
-	
+
 	expectedKeywords := "產出已就緒"
 	if !contains(finalResponse, expectedKeywords) {
 		t.Errorf("最終回覆不符期望, 得到: %q", finalResponse)
@@ -173,7 +174,7 @@ func TestReadFileAttachmentWorkflow(t *testing.T) {
 	defer os.Remove(testFile)
 
 	GlobalAppStore = NewAppStore()
-	
+
 	// 初始化 Mock 並定義行為
 	mockProvider := &MockProvider{
 		Rounds: [][]types.AIEvent{
@@ -196,15 +197,15 @@ func TestReadFileAttachmentWorkflow(t *testing.T) {
 
 	GlobalEngine = &AIBuilderEngine{
 		Provider: mockProvider,
-		Tools:    &ToolsConfig{},
 	}
 
 	wd, _ := os.Getwd()
 	agentCtx := CreateToolUseContext("TEST-ATTACH", "coder", "讀檔測試", wd)
-	
+
 	// 執行測試
 	stream := RunAgent(agentCtx)
-	for range stream { }
+	for range stream {
+	}
 
 	// 驗證
 	if mockProvider.CallCount != 2 {
