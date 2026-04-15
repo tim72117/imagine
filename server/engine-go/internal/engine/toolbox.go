@@ -55,6 +55,16 @@ func (toolbox *Toolbox) Register(name string, handler ToolHandler) {
 }
 
 /**
+ * RegisterWithDeclaration 同時註冊處理器與工具宣告
+ */
+func (toolbox *Toolbox) RegisterWithDeclaration(name string, handler ToolHandler, declaration types.ToolDeclaration) {
+	if handler != nil {
+		toolbox.Handlers[name] = handler
+	}
+	toolbox.Declarations = append(toolbox.Declarations, declaration)
+}
+
+/**
  * SpawnAgent 建立子代理人任務
  */
 func (toolbox *Toolbox) SpawnAgent(role string) string {

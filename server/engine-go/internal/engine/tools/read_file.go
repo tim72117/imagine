@@ -9,6 +9,34 @@ import (
 	"imagine/engine/internal/types"
 )
 
+var ReadDeclaration = types.ToolDeclaration{
+	Name:        "Read",
+	Description: "從本地檔案系統讀取檔案內容。支援純文字、圖片、PDF 以及 Jupyter Notebook。回傳內容會自動附帶行號（從 1 開始）。",
+	Type:        "sync",
+	Parameters: map[string]interface{}{
+		"type": "OBJECT",
+		"properties": map[string]interface{}{
+			"file_path": map[string]interface{}{
+				"type":        "STRING",
+				"description": "要讀取的絕對路徑。",
+			},
+			"offset": map[string]interface{}{
+				"type":        "NUMBER",
+				"description": "開始讀取的起始行號（從 1 開始計數）。適合讀取大型檔案。",
+			},
+			"limit": map[string]interface{}{
+				"type":        "NUMBER",
+				"description": "本次讀取的行數上限。建議單次讀取不超過 2000 行。",
+			},
+			"pages": map[string]interface{}{
+				"type":        "STRING",
+				"description": "PDF 的頁碼範圍（例如 '1-5', '3', '10-20'）。每次呼叫上限 20 頁。",
+			},
+		},
+		"required": []string{"file_path"},
+	},
+}
+
 /**
  * FileState 儲存單個檔案的讀取狀態
  */

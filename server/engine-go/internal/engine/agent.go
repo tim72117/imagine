@@ -23,7 +23,7 @@ type Agent struct {
 
 var GlobalAgentLoader = NewAgentLoader("../.agent")
 
-func NewAgent(roleType string, toolsConfig *ToolsConfig, aiProvider provider.AIProvider) *Agent {
+func NewAgent(roleType string, aiProvider provider.AIProvider) *Agent {
 	agentDefinition, errorValue := GlobalAgentLoader.GetAgent(roleType)
 
 	systemPrompt := ""

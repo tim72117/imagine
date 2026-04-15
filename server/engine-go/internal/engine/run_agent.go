@@ -14,29 +14,19 @@ import (
  */
 type AIBuilderEngine struct {
 	Provider provider.AIProvider
-	Tools    *ToolsConfig
 }
 
 var GlobalEngine *AIBuilderEngine
 
 /**
- * Initialize 執行全域單例注入。它負責載入工具與設定 AI 提供者。
+ * Initialize 執行全域單例注入。工具宣告由各工具檔的 Declaration 自動載入。
  */
-func Initialize(aiProvider provider.AIProvider, toolsPath string) error {
-	toolsConfig, errorValue := LoadToolsConfig(toolsPath)
-	if errorValue != nil {
-		return fmt.Errorf("引擎初始化失敗: %v", errorValue)
-	}
-
-	// 關鍵：初始化工具箱宣告
-	NewToolbox(toolsConfig)
-
+func Initialize(aiProvider provider.AIProvider) error {
 	GlobalEngine = &AIBuilderEngine{
 		Provider: aiProvider,
-		Tools:    toolsConfig,
 	}
 
-	fmt.Printf("[Engine] ✅ 全域引擎初始化完成 (Provider: %T)\n", aiProvider)
+	fmt.Printf("[Engine] ✅ 全域引擎初始化完成 (Provider: %T, 工具數: %d)\n", aiProvider, len(GlobalToolbox.Declarations))
 	return nil
 }
 
@@ -77,7 +67,7 @@ func RunAgent(toolUseContext *ToolUseContext) <-chan types.AIEvent {
 	agentID := toolUseContext.AgentID
 
 	// 初始化核心推論 Agent
-	agent := NewAgent(role, GlobalEngine.Tools, GlobalEngine.Provider)
+	agent := NewAgent(role, GlobalEngine.Provider)
 
 	fmt.Printf("[Engine] ⚡️ 啟動 Agent [%s] (%s) 推論循環...\n", role, agentID)
 

@@ -69,13 +69,8 @@ func TestAgentAsyncWakeupLifecycle(t *testing.T) {
 	coordinator := NewCoordinator()
 	coordinator.Start()
 
-	// 1. 初始化引擎並檢查錯誤 (確保 test_tools.json 在正確路徑)
-	errorValue := Initialize(mockProvider, "../../test_tools.json")
-	if errorValue != nil {
-		// 嘗試不同路徑
-		errorValue = Initialize(mockProvider, "test_tools.json")
-	}
-
+	// 1. 初始化引擎
+	errorValue := Initialize(mockProvider)
 	if errorValue != nil {
 		t.Fatalf("❌ 引擎初始化失敗: %v", errorValue)
 	}

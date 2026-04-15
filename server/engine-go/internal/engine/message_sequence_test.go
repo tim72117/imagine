@@ -69,7 +69,7 @@ func TestMessageSequenceIncrementalCheck(t *testing.T) {
 	mockProvider := &MessageSequenceMockProvider{Rounds: mockEvents}
 
 	// --- 3. 初始化測試環境 ---
-	Initialize(mockProvider, "../../test_tools.json")
+	Initialize(mockProvider)
 	GlobalToolbox.Register("list_files", func(args map[string]interface{}, ctx types.ToolUseContextInterface) (types.ActionResult, error) {
 		return types.ActionResult{Success: true, Data: map[string]interface{}{"files": []string{"a.txt"}}}, nil
 	})
@@ -79,7 +79,7 @@ func TestMessageSequenceIncrementalCheck(t *testing.T) {
 	agentContext.AddMessage("user", types.Message{Role: "user", Text: "請列出檔案", AgentID: testAgentID})
 
 	// --- 4. 執行推論 ---
-	agent := NewAgent("explorer", GlobalEngine.Tools, mockProvider)
+	agent := NewAgent("explorer", mockProvider)
 	eventStream, _ := agent.Run(agentContext, GlobalToolbox.Declarations)
 	for range eventStream { }
 

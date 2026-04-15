@@ -12,6 +12,40 @@ import (
 	"imagine/engine/internal/types"
 )
 
+var BrowserDeclaration = types.ToolDeclaration{
+	Name:        "Browser",
+	Description: "操控瀏覽器的全功能工具。每次呼叫只能執行一個 action。",
+	Type:        "sync",
+	Parameters: map[string]interface{}{
+		"type": "OBJECT",
+		"properties": map[string]interface{}{
+			"action": map[string]interface{}{
+				"type":        "STRING",
+				"enum":        []string{"navigate", "click", "type", "scroll", "screenshot", "get_html"},
+				"description": "要執行的動作類型",
+			},
+			"url": map[string]interface{}{
+				"type":        "STRING",
+				"description": "導航目標網址",
+			},
+			"coordinate": map[string]interface{}{
+				"type":  "ARRAY",
+				"items": map[string]interface{}{"type": "NUMBER"},
+				"description": "[x, y] 座標",
+			},
+			"text": map[string]interface{}{
+				"type":        "STRING",
+				"description": "輸入文字",
+			},
+			"selector": map[string]interface{}{
+				"type":        "STRING",
+				"description": "CSS 選擇器",
+			},
+		},
+		"required": []string{"action"},
+	},
+}
+
 var (
 	browser *rod.Browser
 	page    *rod.Page

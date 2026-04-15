@@ -8,6 +8,26 @@ import (
 	"imagine/engine/internal/types"
 )
 
+var GlobDeclaration = types.ToolDeclaration{
+	Name:        "Glob",
+	Description: "使用萬用字元模式尋找檔案（例如：src/**/*.ts）。支援遞迴搜尋與模式比對。",
+	Type:        "sync",
+	Parameters: map[string]interface{}{
+		"type": "OBJECT",
+		"properties": map[string]interface{}{
+			"pattern": map[string]interface{}{
+				"type":        "STRING",
+				"description": "Glob 模式，例如 'internal/**/*.go' 或 'src/**/*.{js,tsx}'。",
+			},
+			"path": map[string]interface{}{
+				"type":        "STRING",
+				"description": "起始搜尋目錄，預設為當前目錄 (./)。",
+			},
+		},
+		"required": []string{"pattern"},
+	},
+}
+
 // ListFiles (現在作為 Glob 工具實作)
 // 支援萬用字元模式, 例如: src/**/*.ts
 func ListFiles(arguments map[string]interface{}, agentContext types.ToolUseContextInterface) (types.ActionResult, error) {

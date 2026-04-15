@@ -20,7 +20,6 @@ func main() {
 	prompt := flag.String("prompt", "", "The prompt to send to AI (fallback if -context is not used)")
 	contextJson := flag.String("context", "", "JSON string containing full agent context (userMessages, assistantMessages, etc.)")
 	roleFlag := flag.String("role", "coordinator", "Role name for tool filtering (optional)")
-	toolsPath := flag.String("tools", "configs/tools.json", "Path to tools configuration")
 	jsonOutput := flag.Bool("json", false, "Output results in JSON format for machines")
 	flag.Parse()
 
@@ -37,7 +36,7 @@ func main() {
 	}
 
 	// 3. 執行引擎初始化
-	if errorValue := engine.Initialize(aiProvider, *toolsPath); errorValue != nil {
+	if errorValue := engine.Initialize(aiProvider); errorValue != nil {
 		fmt.Printf("Fatal: %v\n", errorValue)
 		os.Exit(1)
 	}

@@ -10,6 +10,8 @@ import (
  */
 type Settings struct {
 	OllamaURL    string `json:"ollama_url"`
+	VLLMBaseURL  string `json:"vllm_base_url"`
+	Model        string `json:"model"`
 	GeminiAPIKey string `json:"gemini_api_key"`
 }
 

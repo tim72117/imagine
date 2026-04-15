@@ -110,7 +110,6 @@ func TestAsyncToolWorkflow(t *testing.T) {
 
 	GlobalEngine = &AIBuilderEngine{
 		Provider: mockProvider,
-		Tools:    &ToolsConfig{}, 
 	}
 
 	coordinator := NewCoordinator()

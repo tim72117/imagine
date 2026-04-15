@@ -19,9 +19,8 @@ import (
  */
 func main() {
 	// 1. 定義 CLI 參數
-	providerName := flag.String("provider", "ollama", "AI provider (claude, gemini or ollama)")
+	providerName := flag.String("provider", "vllm", "AI provider (claude, gemini, ollama or vllm)")
 	modelName := flag.String("model", "gemma4:e2b", "Model name")
-	toolsPath := flag.String("tools", "configs/tools.json", "Path to tools.json configuration")
 	flag.Parse()
 
 	fmt.Println("\x1b[36m" + `
@@ -36,6 +35,13 @@ func main() {
 	queue := provider.NewRequestQueue(1, 100*time.Millisecond)
 
 	switch *providerName {
+	case "vllm":
+		settings, _ := config.LoadSettings("configs/settings.json")
+		model := *modelName
+		if settings.Model != "" {
+			model = settings.Model
+		}
+		aiProvider = provider.NewVLLMProvider(settings.VLLMBaseURL, model, queue)
 	case "ollama":
 		settings, _ := config.LoadSettings("configs/settings.json")
 		aiProvider = provider.NewOllamaProvider(settings.OllamaURL, *modelName, queue)
@@ -49,7 +55,7 @@ func main() {
 	}
 
 	// 3. 執行引擎初始化 (這會注入 Provider 並啟動背景監聽)
-	if errorValue := engine.Initialize(aiProvider, *toolsPath); errorValue != nil {
+	if errorValue := engine.Initialize(aiProvider); errorValue != nil {
 		fmt.Printf("\x1b[31m[Fatal] %v\x1b[0m\n", errorValue)
 		os.Exit(1)
 	}

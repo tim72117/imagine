@@ -4,14 +4,18 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
 	"testing"
 	"time"
 
+	"imagine/engine/internal/config"
 	"imagine/engine/internal/provider"
 	"imagine/engine/internal/types"
 )
+
+var testInput = flag.String("input", "", "測試指令輸入")
 
 /**
  * CaptureProxyProvider 代理真實的 AI Provider 並攔截輸入
@@ -33,28 +37,35 @@ func (p *CaptureProxyProvider) GenerateStream(ctx context.Context, messages []ty
 }
 
 /**
- * TestRealInferenceInputCapture 執行此測試以查看「真實 Ollama 推論」中的每一輪輸入
- * 現在支援互動式輸入與真實工具調用
+ * TestRealInferenceInputCapture 攔截預設 Provider 的每一輪輸入
+ * Provider 設定從 configs/settings.json 載入
  */
 func TestRealInferenceInputCapture(t *testing.T) {
-	// 1. 初始化真實的 Ollama Provider
+	// 1. 從 settings.json 載入預設 Provider
+	settings, _ := config.LoadSettings("../../configs/settings.json")
 	queue := provider.NewRequestQueue(1, 100*time.Millisecond)
-	realOllama := provider.NewOllamaProvider("http://localhost:11434", "gemma4:e2b", queue)
-	
-	proxyProvider := &CaptureProxyProvider{RealProvider: realOllama}
 
-	// 2. 獲取使用者輸入
-	var userInput string
-	fmt.Print("\n👉 \x1b[32m請輸入測試指令:\x1b[0m ")
-	
-	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
-	if err == nil {
-		defer tty.Close()
-		scanner := bufio.NewScanner(tty)
-		if scanner.Scan() {
-			userInput = scanner.Text()
-		}
-	} else {
+	var realProvider provider.AIProvider
+	switch {
+	case settings.VLLMBaseURL != "":
+		realProvider = provider.NewVLLMProvider(settings.VLLMBaseURL, settings.Model, queue)
+		t.Logf("✅ 使用 vLLM Provider: %s, 模型: %s", settings.VLLMBaseURL, settings.Model)
+	case settings.OllamaURL != "":
+		realProvider = provider.NewOllamaProvider(settings.OllamaURL, settings.Model, queue)
+		t.Logf("✅ 使用 Ollama Provider: %s, 模型: %s", settings.OllamaURL, settings.Model)
+	default:
+		t.Fatal("settings.json 未設定任何 Provider URL")
+	}
+
+	proxyProvider := &CaptureProxyProvider{RealProvider: realProvider}
+
+	// 2. 獲取使用者輸入 (優先順序: -args -input > 環境變數 TEST_INPUT > stdin)
+	userInput := *testInput
+	if userInput == "" {
+		userInput = os.Getenv("TEST_INPUT")
+	}
+	if userInput == "" {
+		fmt.Print("\n👉 \x1b[32m請輸入測試指令:\x1b[0m ")
 		scanner := bufio.NewScanner(os.Stdin)
 		if scanner.Scan() {
 			userInput = scanner.Text()
@@ -62,16 +73,17 @@ func TestRealInferenceInputCapture(t *testing.T) {
 	}
 
 	if userInput == "" {
-		t.Fatal("未收到輸入或讀取內容為空")
+		t.Fatal("未收到輸入，請使用: go test -run TestRealInferenceInputCapture -args -input=\"指令\"")
 	}
 
-	// 3. 直接使用確認過後的絕對路徑載入 .agent 目錄
-	GlobalAgentLoader = NewAgentLoader("/Users/caitingyu/Documents/imagine/server/.agent")
-	t.Logf("✅ 使用固定 Agent 目錄: %s", "/Users/caitingyu/Documents/imagine/server/.agent")
+	// 3. 載入 .agent 目錄 (相對於模組根目錄)
+	agentDir := "../../../.agent"
+	GlobalAgentLoader = NewAgentLoader(agentDir)
+	t.Logf("✅ 使用 Agent 目錄: %s", agentDir)
 
 	// 4. 使用真實的 Engine 初始化流程 (會載入真實工具與宣告)
 	// 注意：tools.json 路徑相對於 Package 目錄
-	Initialize(proxyProvider, "../../configs/tools.json")
+	Initialize(proxyProvider)
 	t.Logf("✅ 真實引擎與工具初始化完成")
 
 	// 5. 設定任務與 Context
@@ -80,7 +92,7 @@ func TestRealInferenceInputCapture(t *testing.T) {
 	agentContext.AddMessage("user", types.Message{Role: "user", Text: userInput, AgentID: testAgentID})
 
 	// 6. 載入 Agent 並發起推論
-	agent := NewAgent("explorer", &ToolsConfig{}, proxyProvider)
+	agent := NewAgent("explorer", proxyProvider)
 	
 	fmt.Printf("\n[Test] 🎬 Agent [%s] 初始化完成，開始真實工具推論攔截...\n", agent.RoleName)
 	eventStream, _ := agent.Run(agentContext, GlobalToolbox.Declarations)
