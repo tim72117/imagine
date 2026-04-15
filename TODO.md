@@ -74,6 +74,9 @@ worker 可以用文字的方式設定技能
 ### 4. `send_message` 重複出現問題 (Duplicate Output Loop)
 - [ ] 修正 `ai_request` 的解析邏輯與 `generateContentStream` 的 chunk 捕捉方式，確保不會對同一段文字重複派發任務。
 
+### 5. 子任務隔離與 Context 管理 (New)
+- [ ] **TODO: 隔離子任務的 context**：確保派發出的 Worker 擁有獨立的 `agentContext` 空間，避免對話紀錄 (Messages) 與父代理人交叉污染。
+
 ---
 
 ## 💡 靈感與想法 (Ideas & Future Visions)
