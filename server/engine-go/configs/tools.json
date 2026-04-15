@@ -1,85 +1,51 @@
 {
   "declarations": {
-    "list_files": {
-      "name": "list_files",
-      "description": "獲取專案目錄清單。會為每個檔案產生唯一代碼（如 [F1]），後續工具應優先使用此代碼代替路徑。",
+    "Glob": {
+      "name": "Glob",
+      "description": "使用萬用字元模式尋找檔案（例如：src/**/*.ts）。支援遞迴搜尋與模式比對。",
       "parameters": {
         "type": "OBJECT",
         "properties": {
+          "pattern": {
+            "type": "STRING",
+            "description": "Glob 模式，例如 'internal/**/*.go' 或 'src/**/*.{js,tsx}'。"
+          },
           "path": {
             "type": "STRING",
-            "description": "要讀取的目錄路徑（例如: . 或 src/sandbox/）"
-          },
-          "explanation": {
-            "type": "STRING",
-            "description": "說明為何此時需要獲取此清單。"
-          },
-          "next_step": {
-            "type": "STRING",
-            "description": "獲取清單後預計執行的下一步分析動作。"
+            "description": "起始搜尋目錄，預設為當前目錄 (./)。"
           }
         },
         "required": [
-          "path",
-          "explanation",
-          "next_step"
+          "pattern"
         ]
       },
       "type": "sync"
     },
-    "list_files_async": {
-      "name": "list_files_async",
-      "description": "【非同步版】獲取專案目錄清單。當目錄非常龐大時使用，系統會立即回報派發狀態，並在背景處理完成後回報結果。",
+    "Read": {
+      "name": "Read",
+      "description": "從本地檔案系統讀取檔案內容。支援純文字、圖片、PDF 以及 Jupyter Notebook。回傳內容會自動附帶行號（從 1 開始）。",
       "parameters": {
         "type": "OBJECT",
         "properties": {
-          "path": {
+          "file_path": {
             "type": "STRING",
-            "description": "要讀取的目錄路徑。"
-          },
-          "explanation": {
-            "type": "STRING",
-            "description": "說明為何需要非同步讀取。"
-          }
-        },
-        "required": [
-          "path",
-          "explanation"
-        ]
-      },
-      "type": "async"
-    },
-    "read_file": {
-      "name": "read_file",
-      "description": "讀取專案內特定檔案內容。支援分段讀取大檔案，並具備快取優化機制。",
-      "parameters": {
-        "type": "OBJECT",
-        "properties": {
-          "path": {
-            "type": "STRING",
-            "description": "檔案路徑或檔案代碼（例：[F1]）"
+            "description": "要讀取的絕對路徑。"
           },
           "offset": {
             "type": "NUMBER",
-            "description": "讀取起始行號（從 1 開始，預設為 1）"
+            "description": "開始讀取的起始行號（從 1 開始計數）。適合讀取大型檔案。"
           },
           "limit": {
             "type": "NUMBER",
-            "description": "讀取的行數限制（預設為 500 行）"
+            "description": "本次讀取的行數上限。建議單次讀取不超過 2000 行。"
           },
-          "explanation": {
+          "pages": {
             "type": "STRING",
-            "description": "【極簡】說明為何此時需要調閱此檔案內容。"
-          },
-          "next_step": {
-            "type": "STRING",
-            "description": "讀取並分析內容後，預計要執行的下一步動作。"
+            "description": "PDF 的頁碼範圍（例如 '1-5', '3', '10-20'）。每次呼叫上限 20 頁。"
           }
         },
         "required": [
-          "path",
-          "explanation",
-          "next_step"
+          "file_path"
         ]
       },
       "type": "sync"
@@ -183,6 +149,50 @@
         ]
       },
       "type": "async"
+    },
+    "Browser": {
+      "name": "Browser",
+      "description": "操控瀏覽器的全功能工具。每次呼叫只能執行一個 action。",
+      "parameters": {
+        "type": "OBJECT",
+        "properties": {
+          "action": {
+            "type": "STRING",
+            "enum": [
+              "navigate",
+              "click",
+              "type",
+              "scroll",
+              "screenshot",
+              "get_html"
+            ],
+            "description": "要執行的動作類型"
+          },
+          "url": {
+            "type": "STRING",
+            "description": "導航目標網址"
+          },
+          "coordinate": {
+            "type": "ARRAY",
+            "items": {
+              "type": "NUMBER"
+            },
+            "description": "[x, y] 座標"
+          },
+          "text": {
+            "type": "STRING",
+            "description": "輸入文字"
+          },
+          "selector": {
+            "type": "STRING",
+            "description": "CSS 選擇器"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "type": "sync"
     }
   }
 }

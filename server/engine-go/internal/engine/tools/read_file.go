@@ -2,7 +2,9 @@ package tools
 
 import (
 	"bufio"
+	"fmt"
 	"os"
+	"path/filepath"
 
 	"imagine/engine/internal/types"
 )
@@ -43,7 +45,7 @@ func (s *ReadFileState) Set(path string, state *FileState) {
  * ReadFile 工具實作
  */
 func ReadFile(arguments map[string]interface{}, agentContext types.ToolUseContextInterface) (types.ActionResult, error) {
-	pathArgument, _ := arguments["path"].(string)
+	pathArgument, _ := arguments["file_path"].(string)
 	offset, _ := arguments["offset"].(float64)
 	limit, _ := arguments["limit"].(float64)
 	if limit == 0 {
@@ -77,7 +79,8 @@ func ReadFile(arguments map[string]interface{}, agentContext types.ToolUseContex
 	// 2. 執行磁碟分段讀取 (Targeted Disk I/O)
 	file, err := os.Open(fullPath)
 	if err != nil {
-		return types.ActionResult{Success: false, Error: err.Error()}, nil
+		errorMessage := fmt.Sprintf("%v. 指引: 如果你確信檔案存在但路徑不對，請嘗試使用 Glob(pattern=\"**/%s\") 進行全域檢索。", err, filepath.Base(pathArgument))
+		return types.ActionResult{Success: false, Error: errorMessage}, nil
 	}
 	defer file.Close()
 

@@ -41,7 +41,7 @@ func Initialize(aiProvider provider.AIProvider, toolsPath string) error {
 }
 
 /**
- * RunWithAgentID 是系統的高層進入點。
+ * RunWithAgentID 是系統的高層進入端。
  */
 func RunWithAgentID(agentID string, role string, task string) {
 	if GlobalEngine == nil {
@@ -51,8 +51,9 @@ func RunWithAgentID(agentID string, role string, task string) {
 
 	// 1. 準備上下文
 	workingDirectory, _ := os.Getwd()
+	agentContext := CreateToolUseContext(agentID, role, task, workingDirectory)
 	
-	agentContext := CreateAgentContextWithID(agentID, role, task, workingDirectory)
+	// 直接併入初始訊息 (不經過隊列，維持最簡潔的啟動路徑)
 	agentContext.AddMessage("user", types.Message{
 		Role:    "user",
 		Text:    task,
@@ -60,20 +61,20 @@ func RunWithAgentID(agentID string, role string, task string) {
 		AgentID: agentID,
 	})
 
-	// 2. 調用核心執行器
+	// 2. 直接調用核心執行器
 	RunAgent(agentContext)
 }
 
 /**
- * RunAgent 負責核心的「推論執行」流程，並回傳事件串流。
+ * RunAgent 負責核心的「推論執行」流程。
  */
-func RunAgent(agentContext *ToolUseContext) <-chan types.AIEvent {
+func RunAgent(toolUseContext *ToolUseContext) <-chan types.AIEvent {
 	if GlobalEngine == nil {
 		return nil
 	}
 
-	role := agentContext.Role
-	agentID := agentContext.AgentID
+	role := toolUseContext.Role
+	agentID := toolUseContext.AgentID
 
 	// 初始化核心推論 Agent
 	agent := NewAgent(role, GlobalEngine.Tools, GlobalEngine.Provider)
@@ -81,7 +82,7 @@ func RunAgent(agentContext *ToolUseContext) <-chan types.AIEvent {
 	fmt.Printf("[Engine] ⚡️ 啟動 Agent [%s] (%s) 推論循環...\n", role, agentID)
 
 	// 執行推論
-	eventStream, errorValue := agent.Run(agentContext, GlobalToolbox.Declarations)
+	eventStream, errorValue := agent.Run(toolUseContext, GlobalToolbox.Declarations)
 	if errorValue != nil {
 		fmt.Printf("[Engine] ❌ 啟動失敗: %v\n", errorValue)
 		return nil

@@ -80,17 +80,6 @@ func (m *MockProvider) GenerateStream(ctx context.Context, messages []types.Mess
 
 /**
  * TestAsyncToolWorkflow 完整測試「非同步工具 (bash)」的執行、等待、喚醒與讀取流程。
- *
- * 測試流程 (Workflow):
- * 1. 環境初始化: 清理舊的 session 檔案，重置全域 Store。
- * 2. 工具註冊: 註冊非同步工具 `bash`。
- * 3. 任務提交: 模擬用戶要求「幫我編譯專案」。
- * 4. 第一階段驗證 (推理循環與等待):
- *    - 確認 CallCount 為 2 (Round 1: 呼叫 bash; Round 2: AI 回應說明啟動中)。
- * 5. 關鍵：休眠模擬 (持久化驗證)。
- * 6. 非同步事件觸發: 模擬 bash 執行結束。
- * 7. 最終輸出驗證 (Pull Model):
- *    - 驗證 Agent 喚醒後是否成功從 Task Store 拉取結果。
  */
 func TestAsyncToolWorkflow(t *testing.T) {
 	_ = os.RemoveAll("sessions") 
@@ -107,7 +96,7 @@ func TestAsyncToolWorkflow(t *testing.T) {
 	mockProvider := &MockProvider{}
 
 	// 註冊 bash 非同步模擬工具
-	GlobalToolbox.Register("bash", func(args map[string]interface{}, ctx types.AgentContextInterface) (types.ActionResult, error) {
+	GlobalToolbox.Register("bash", func(args map[string]interface{}, ctx types.ToolUseContextInterface) (types.ActionResult, error) {
 		fmt.Printf("    [Check 1] 🔧 執行指令: %v\n", args["command"])
 		// 模擬長耗時工作
 		time.Sleep(1 * time.Second) 
@@ -128,7 +117,7 @@ func TestAsyncToolWorkflow(t *testing.T) {
 	coordinator.Start()
 
 	wd, _ := os.Getwd()
-	agentCtx := CreateAgentContextWithID(testAgentID, "coder", "幫我編譯專案", wd)
+	agentCtx := CreateToolUseContext(testAgentID, "coder", "幫我編譯專案", wd)
 	agentCtx.AddMessage("user", types.Message{Role: "user", Text: "幫我編譯專案", AgentID: testAgentID})
 	
 	fmt.Printf("[Test] 🚀 啟動非同步工具測試 (bash, ID: %s)...\n", testAgentID)
@@ -140,12 +129,11 @@ func TestAsyncToolWorkflow(t *testing.T) {
 	// 模擬休眠
 	fmt.Println("[Test] 💤 模擬 Agent 進入休眠...")
 	GlobalAppStore.Lock()
-	agentMap := GlobalAppStore.state["agents"].(map[string]*ToolUseContext)
-	delete(agentMap, testAgentID)
+	GlobalAppStore.state["agent"] = (*ToolUseContext)(nil) 
 	GlobalAppStore.Unlock()
 
 	// 驗證持久化
-	agentCtx, _ = LoadAgentContext(testAgentID)
+	agentCtx, _ = LoadToolUseContext(testAgentID)
 	if mockProvider.CallCount != 2 {
 		t.Errorf("期望 2 次推論, 得到 %d", mockProvider.CallCount)
 	}
@@ -155,7 +143,7 @@ func TestAsyncToolWorkflow(t *testing.T) {
 	time.Sleep(2 * time.Second) 
 	
 	// 重新載入檢查喚醒
-	agentCtx, _ = LoadAgentContext(testAgentID)
+	agentCtx, _ = LoadToolUseContext(testAgentID)
 	fmt.Printf("[Check 4] 當前 Round: %d, CallCount: %d\n", agentCtx.Round, mockProvider.CallCount)
 
 	if mockProvider.CallCount < 3 {
@@ -195,8 +183,8 @@ func TestReadFileAttachmentWorkflow(t *testing.T) {
 				{
 					Type: "action",
 					Action: &types.ActionData{
-						Name: "read_file",
-						Args: map[string]interface{}{"path": testFile},
+						Name: "Read",
+						Args: map[string]interface{}{"file_path": testFile},
 					},
 				},
 			},
@@ -213,7 +201,7 @@ func TestReadFileAttachmentWorkflow(t *testing.T) {
 	}
 
 	wd, _ := os.Getwd()
-	agentCtx := CreateAgentContextWithID("TEST-ATTACH", "coder", "讀檔測試", wd)
+	agentCtx := CreateToolUseContext("TEST-ATTACH", "coder", "讀檔測試", wd)
 	
 	// 執行測試
 	stream := RunAgent(agentCtx)

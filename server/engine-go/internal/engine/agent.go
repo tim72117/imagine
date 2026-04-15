@@ -80,11 +80,9 @@ func (agent *Agent) Run(toolUseContext *ToolUseContext, allDeclarations []types.
 			})
 
 			// B. 注入對話歷史與當前暫存區 (歷史 -> 本輪思考 -> 本輪結果)
-			toolUseContext.RLock()
 			messages = append(messages, toolUseContext.Messages[0]...)
 			messages = append(messages, toolUseContext.Messages[1]...)
 			messages = append(messages, toolUseContext.Messages[2]...)
-			toolUseContext.RUnlock()
 
 			// C. 注入附件 (Contextual Memory)
 			messages = append(messages, agent.GetAttachmentMessages(toolUseContext)...)
@@ -153,10 +151,18 @@ func (agent *Agent) Run(toolUseContext *ToolUseContext, allDeclarations []types.
 						})
 
 						// 2. 將回傳結果寫入對話紀錄
-						resultData, _ := json.Marshal(result.Data)
+						var messageText string
+						if result.Success {
+							resultData, _ := json.Marshal(result.Data)
+							messageText = string(resultData)
+						} else {
+							// 執行失敗時，回傳錯誤訊息給 AI
+							messageText = fmt.Sprintf("Error: %s", result.Error)
+						}
+
 						toolUseContext.AddMessage("tool", types.Message{
 							Role: "tool",
-							Text: string(resultData),
+							Text: messageText,
 							Tool: streamEvent.Action.Name,
 						})
 					}
@@ -186,3 +192,6 @@ func (agent *Agent) Run(toolUseContext *ToolUseContext, allDeclarations []types.
 
 	return resultEvents, nil
 }
+
+
+

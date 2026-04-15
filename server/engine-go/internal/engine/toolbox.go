@@ -7,7 +7,7 @@ import (
 )
 
 // ToolHandler 定義了工具執行的具體邏輯函式型別
-type ToolHandler func(arguments map[string]interface{}, contextInstance types.AgentContextInterface) (types.ActionResult, error)
+type ToolHandler func(arguments map[string]interface{}, contextInstance types.ToolUseContextInterface) (types.ActionResult, error)
 
 /**
  * Toolbox 負責管理 Go 版引擎的工具宣告與處理器
@@ -66,7 +66,7 @@ func (toolbox *Toolbox) SpawnAgent(role string) string {
 /**
  * ExecuteTool 是工具執行的統一入口。
  */
-func (toolbox *Toolbox) ExecuteTool(name string, arguments map[string]interface{}, agentContext types.AgentContextInterface) (types.ActionResult, string, error) {
+func (toolbox *Toolbox) ExecuteTool(name string, arguments map[string]interface{}, agentContext types.ToolUseContextInterface) (types.ActionResult, string, error) {
 	fmt.Printf("\n[Toolbox] 🛠️ 執行工具: %s\n", name)
 
 	description := fmt.Sprintf("已開始執行同步工具: %s", name)
@@ -90,7 +90,7 @@ func (toolbox *Toolbox) ExecuteTool(name string, arguments map[string]interface{
 /**
  * RunAsyncTool 在背景執行工具並在完成後通知事件總線 (EventBus)
  */
-func (toolbox *Toolbox) RunAsyncTool(agentContext types.AgentContextInterface, taskID string, toolName string, arguments map[string]interface{}) string {
+func (toolbox *Toolbox) RunAsyncTool(agentContext types.ToolUseContextInterface, taskID string, toolName string, arguments map[string]interface{}) string {
 	// 立即回傳說明文字給呼叫者
 	description := fmt.Sprintf("已啟動非同步工具: %s，任務編號為 %s，請留意後續進度。", toolName, taskID)
 

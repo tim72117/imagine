@@ -48,7 +48,7 @@ func (store *AppStore) TryLockAgent(agentID string) bool {
 	store.Lock()
 	defer store.Unlock()
 	
-	agentContext := store.state["agent"].(*ToolUseContext)
+	agentContext, _ := store.state["agent"].(*ToolUseContext)
 	if agentContext == nil {
 		return true
 	}
@@ -68,7 +68,7 @@ func (store *AppStore) UnlockAgent(agentID string) {
 	store.Lock()
 	defer store.Unlock()
 	
-	if agentContext := store.state["agent"].(*ToolUseContext); agentContext != nil {
+	if agentContext, ok := store.state["agent"].(*ToolUseContext); ok && agentContext != nil {
 		agentContext.IsRunning = false
 	}
 }
@@ -97,10 +97,10 @@ func (store *AppStore) CreateTaskWithID(taskID string, role string, agentID stri
 		State:         make(map[string]interface{}),
 	}
 
-	GlobalAppStore.Lock()
-	taskMap := GlobalAppStore.state["tasks"].(map[string]*types.Task)
+	store.Lock()
+	taskMap := store.state["tasks"].(map[string]*types.Task)
 	taskMap[taskID] = task
-	GlobalAppStore.Unlock()
+	store.Unlock()
 }
 
 /**
@@ -185,6 +185,24 @@ func (store *AppStore) UpdateTaskState(taskID string, key string, value interfac
 			task.State = make(map[string]interface{})
 		}
 		task.State[key] = value
+		task.UpdatedAt = time.Now()
+	}
+}
+
+/**
+ * UpdateTaskStatus 更新特定任務的狀態
+ */
+func (store *AppStore) UpdateTaskStatus(taskID string, status types.TaskStatus) {
+	store.Lock()
+	defer store.Unlock()
+
+	taskMap, isFound := store.state["tasks"].(map[string]*types.Task)
+	if !isFound {
+		return
+	}
+
+	if task, exists := taskMap[taskID]; exists {
+		task.Status = status
 		task.UpdatedAt = time.Now()
 	}
 }

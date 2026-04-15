@@ -3,6 +3,8 @@ package engine
 import (
 	"fmt"
 	"sync"
+
+	"imagine/engine/internal/types"
 )
 
 /**
@@ -22,6 +24,11 @@ type EventBus struct {
  * GlobalEventBus 全域單例
  */
 var GlobalEventBus = NewEventBus()
+
+/**
+ * GlobalCommandQueue 全域指令隊列，負責緩衝所有來自用戶或系統事件的 Agent 指令。
+ */
+var GlobalCommandQueue = make(chan types.Message, 100)
 
 /**
  * NewEventBus 建立一個新的事件總線實例
